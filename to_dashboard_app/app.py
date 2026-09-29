@@ -193,6 +193,24 @@ def import_page():
                 edf=read_table_bytes(extras.getvalue(),extras.name); c=conn(); sid,stats=import_extras_daily_file(c,edf); c.close(); st.success(f'Extras daily update completed: {stats}'); st.rerun()
             except Exception as e: st.error(f'Extras daily update failed: {e}')
 
+    st.divider()
+    st.subheader('🧩 Repair / Rebuild Current Summary')
+    st.caption('Use this only if the Base import completed but Match + Part shows 0. It rebuilds the summary from the already-imported Base + Extras + Match metadata without re-uploading files.')
+    if st.button('🔧 Rebuild Current Match + Part Summary', key='rebuild_current_summary'):
+        try:
+            c=conn(); sid=current_snapshot_id()
+            if not sid:
+                raise ValueError('No CURRENT snapshot exists.')
+            build_base_summary(c,sid)
+            n=c.execute('SELECT COUNT(*) FROM match_part_summary WHERE snapshot_id=?',(sid,)).fetchone()[0]
+            c.close()
+            st.success(f'✅ Current summary rebuilt: {n:,} Match + Part rows.')
+            st.rerun()
+        except Exception as e:
+            try: c.close()
+            except Exception: pass
+            st.error(f'❌ Summary rebuild failed: {e}')
+
     st.divider(); st.subheader('Latest Imports'); st.dataframe(df('SELECT * FROM imports ORDER BY id DESC LIMIT 20'),use_container_width=True,hide_index=True)
 
 
