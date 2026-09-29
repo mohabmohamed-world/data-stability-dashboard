@@ -341,6 +341,39 @@ def refresh_recollection_status(c, snapshot_id):
     return run_id
 
 
+def import_distributed_parts(c, df, snapshot_id, source_name="Manual Distribution"):
+    ensure_recollection_tables(c)
+    mid = _pick(df, "match_id", "event_match_id", "match")
+    pid = _pick(df, "part_id", "part", "event_part_id")
+    reviewer = _pick(df, "reviewer_code", "reviewer", "collector")
+    if not (mid and pid):
+        raise ValueError("Distribution file needs Match ID and Part ID columns.")
+
+    now = datetime.now().isoformat(timespec="seconds")
+    seen = set()
+    inserted = 0
+    for _, r in df.iterrows():
+        if pd.isna(r[mid]) or pd.isna(r[pid]):
+            continue
+        m, p = int(float(r[mid])), int(float(r[pid]))
+        key = (m, p)
+        if key in seen:
+            continue
+        seen.add(key)
+        rv = str(r[reviewer]).strip() if reviewer and pd.notna(r[reviewer]) and str(r[reviewer]).strip() else None
+        cur = c.execute(
+            "INSERT OR IGNORE INTO review_assignments
+             (snapshot_id,reviewer_code,match_id,part_id,assigned_at,status,source)
+             VALUES(?,?,?,?,?,?,?)",
+            (snapshot_id, rv, m, p, now, "ASSIGNED", "MANUAL_IMPORT"),
+        )
+        inserted += int(cur.rowcount or 0)
+
+    c.commit()
+    refresh_recollection_status(c, snapshot_id)
+    return inserted
+
+
 def latest_run(c):
     ensure_recollection_tables(c)
     row = c.execute("SELECT id,source_name,uploaded_at,rows_read,rows_loaded FROM recollection_runs ORDER BY id DESC LIMIT 1").fetchone()
@@ -354,16 +387,19 @@ def recollection_counts(c, snapshot_id):
         return {"total":0,"changed":0,"ops_excluded":0,"reviewed_excluded":0,"eligible":0,"hold":0,"do_not_distribute":0}
     row = c.execute(
         """SELECT COUNT(*) total,
+                  SUM(difference>0) positive_changed,
                   SUM(abs_difference>0) changed,
                   SUM(ops_excluded=1) ops_excluded,
                   SUM(reviewed_excluded=1) reviewed_excluded,
                   SUM(status='REVIEW_CANDIDATE') eligible,
+                  SUM(benchmark_status='MEETS_BENCHMARK' AND status='REVIEW_CANDIDATE') meets_benchmark,
+                  SUM(benchmark_status='BELOW_BENCHMARK' AND status='REVIEW_CANDIDATE') below_benchmark,
                   SUM(status='HOLD') hold,
                   SUM(status='DO_NOT_DISTRIBUTE') do_not_distribute
            FROM recollection_items WHERE run_id=?""",
         (run_id,)
     ).fetchone()
-    keys = ["total","changed","ops_excluded","reviewed_excluded","eligible","hold","do_not_distribute"]
+    keys = ["total","positive_changed","changed","ops_excluded","reviewed_excluded","eligible","meets_benchmark","below_benchmark","hold","do_not_distribute"]
     return {k:int(row[i] or 0) for i,k in enumerate(keys)}
 
 
