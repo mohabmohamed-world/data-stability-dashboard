@@ -428,7 +428,7 @@ def smart_assign_next_batch(c, snapshot_id, per_reviewer=6):
     normal_keys=[(int(r[0]),int(r[1])) for r in normal_rows]
 
     selected=[("RECOLLECTION",)+k for k in rec_keys[:capacity]]
-    selected += [("NORMAL",)+k for k in normal_keys[:max(0,capacity-len(selected))]
+    selected += [("NORMAL",)+k for k in normal_keys[:max(0,capacity-len(selected))]]
 
     now=datetime.now().isoformat(timespec="seconds")
     inserts=[]; idx=0; rec_n=0; norm_n=0
