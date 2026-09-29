@@ -17,7 +17,7 @@ EVENT_COLS={
 def _norm(x):
     s=str(x).strip().lower()
     s=re.sub(r'\s+',' ',s)
-    return s.replace('_',' ').replace('-','-')
+    return s.replace('_',' ').replace('-',' ')
 
 def read_table_bytes(raw:bytes, source_name:str='file')->pd.DataFrame:
     if raw[:2] in (b'\xff\xfe',b'\xfe\xff'):
