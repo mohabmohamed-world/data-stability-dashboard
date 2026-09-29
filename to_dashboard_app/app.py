@@ -36,7 +36,10 @@ def extras_initialized():
 
 
 def current_snapshot_id():
-    return scalar("SELECT id FROM snapshots WHERE snapshot_type='CURRENT' ORDER BY id DESC LIMIT 1")
+    c=conn()
+    row=c.execute("SELECT id FROM snapshots WHERE snapshot_type='CURRENT' ORDER BY id DESC LIMIT 1").fetchone()
+    c.close()
+    return row[0] if row else None
 
 
 def assign_next_batch(sid):
