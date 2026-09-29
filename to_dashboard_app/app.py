@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
-from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, latest_run, recollection_counts, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
+from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, import_distributed_parts, latest_run, recollection_counts, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
 
 APP_DIR=Path(__file__).resolve().parent
 # Streamlit Community Cloud uses a mounted source tree that is not a good place
@@ -290,7 +290,7 @@ def queue_page():
 
     # Recollection input + decision layer.
     st.subheader('🔁 Recollection Review')
-    st.caption('ارفع Recollection الجديدة + Ops Completed Recollection + Competition Benchmark. النظام يطابق Match ID + Part ويطبّق قاعدة Review Again تلقائياً: change > 0 و Absolute Difference >= Competition Benchmark Average Diff.')
+    st.caption('ارفع Recollection + Ops Completed + Competition Benchmark. التغيير الموجب هو بوابة المرشح للتوزيع؛ الـCompetition Benchmark مؤشر أولوية/سياق وليس شرط استبعاد.')
 
     u1,u2,u3=st.columns(3)
     with u1:
@@ -337,18 +337,33 @@ def queue_page():
         st.info(f"Current Recollection: **{run['source_name']}** — {int(run['rows_loaded']):,} unique Match + Part rows loaded.")
         m1,m2,m3,m4,m5=st.columns(5)
         m1.metric('Recollection',f"{rc['total']:,}")
-        m2.metric('Changed',f"{rc['changed']:,}")
+        m2.metric('Positive Change',f"{rc['positive_changed']:,}")
         m3.metric('Ops Excluded',f"{rc['ops_excluded']:,}")
         m4.metric('Reviewed Excluded',f"{rc['reviewed_excluded']:,}")
-        m5.metric('Eligible Recollection',f"{rc['eligible']:,}")
+        m5.metric('Review Candidates',f"{rc['eligible']:,}")
         if rc['hold']:
             st.warning(f"⚠️ {rc['hold']:,} Recollection rows are on HOLD (missing benchmark or current dashboard match).")
+        cstat1,cstat2,cstat3=st.columns(3)
+        cstat1.metric('Meets Benchmark',f"{rc['meets_benchmark']:,}")
+        cstat2.metric('Below Benchmark',f"{rc['below_benchmark']:,}")
+        cstat3.metric('No Positive Change',f"{rc['do_not_distribute']:,}")
+        st.caption('Below Benchmark لا يعني الاستبعاد؛ هو فقط مؤشر إن التغيير أقل من متوسط الـCompetition benchmark.')
+        dist_up=st.file_uploader('Sync Manual Distribution (optional)',type=['csv','tsv','txt'],key='manual_distribution_upload')
+        if dist_up and st.button('🔄 Sync Already Distributed Halves',key='sync_manual_distribution'):
+            try:
+                c=conn(); n=import_distributed_parts(c,read_table_bytes(dist_up.getvalue(),dist_up.name),sid,dist_up.name); c.close()
+                st.success(f'✅ Synced {n:,} already-distributed halves. They will no longer be assigned again.')
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Distribution sync failed: {e}')
+
         if not rec_q.empty:
+            st.write(f"{len(rec_q):,} Recollection candidates available for distribution.")
             st.dataframe(rec_q,use_container_width=True,hide_index=True)
             st.download_button('📥 Export Eligible Recollection Queue',rec_q.to_csv(index=False).encode('utf-8-sig'),
                                file_name='recollection_review_queue.csv',mime='text/csv')
         else:
-            st.success('No Recollection halves are currently eligible for distribution.')
+            st.success('No Recollection candidates are currently available for distribution.')
     else:
         st.warning('⚠️ No Recollection file loaded yet. Upload it above before using Assign Next Batch.')
 
