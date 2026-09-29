@@ -48,6 +48,7 @@ def ensure_recollection_tables(c):
         difference REAL,
         abs_difference REAL,
         benchmark_avg_diff REAL,
+        benchmark_status TEXT,
         severity TEXT,
         severity_rank INTEGER,
         collection_completion TEXT,
@@ -74,6 +75,9 @@ def ensure_recollection_tables(c):
         source_name TEXT,
         imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""")
+    cols = {r[1] for r in c.execute("PRAGMA table_info(recollection_items)").fetchall()}
+    if "benchmark_status" not in cols:
+        c.execute("ALTER TABLE recollection_items ADD COLUMN benchmark_status TEXT")
     c.execute("CREATE INDEX IF NOT EXISTS idx_recollection_items_run ON recollection_items(run_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_recollection_items_key ON recollection_items(match_id,part_id)")
     c.commit()
@@ -231,19 +235,21 @@ def import_recollection(c, df, snapshot_id, source_name="Recollection"):
             status, reason = "EXCLUDED", "ALREADY_REVIEWED"
         elif asg_ex:
             status, reason = "EXCLUDED", "ALREADY_ASSIGNED"
-        elif bmark is None:
-            status, reason = "HOLD", "MISSING_BENCHMARK"
-        elif diff <= 0:
-            status, reason = "DO_NOT_DISTRIBUTE", "NO_POSITIVE_CHANGE"
-        elif abs_diff < bmark:
-            status, reason = "DO_NOT_DISTRIBUTE", "BELOW_BENCHMARK"
+        elif diff > 0:
+            status, reason = "REVIEW_CANDIDATE", None
         else:
-            status, reason = "ELIGIBLE", None
+            status, reason = "DO_NOT_DISTRIBUTE", "NO_POSITIVE_CHANGE"
+
+        benchmark_status = (
+            "MEETS_BENCHMARK" if (bmark is not None and abs_diff is not None and abs_diff >= bmark)
+            else "BELOW_BENCHMARK" if (bmark is not None and abs_diff is not None)
+            else "NO_BENCHMARK"
+        )
 
         rows.append((
             run_id,m,p,match_name,competition,
             str(r[collector]) if collector and pd.notna(r[collector]) else None,
-            rec_total,current_total,diff,abs_diff,bmark,
+            rec_total,current_total,diff,abs_diff,bmark,benchmark_status,
             severity,sev_rank,completion,status,reason,
             int(ops_ex),int(rev_ex),int(asg_ex)
         ))
@@ -251,8 +257,8 @@ def import_recollection(c, df, snapshot_id, source_name="Recollection"):
     c.executemany(
         """INSERT OR REPLACE INTO recollection_items
            (run_id,match_id,part_id,match_name,competition,collector,recollection_total,current_total,difference,abs_difference,
-            benchmark_avg_diff,severity,severity_rank,collection_completion,status,exclusion_reason,ops_excluded,reviewed_excluded,assigned_excluded)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            benchmark_avg_diff,benchmark_status,severity,severity_rank,collection_completion,status,exclusion_reason,ops_excluded,reviewed_excluded,assigned_excluded)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         rows,
     )
     c.commit()
@@ -310,24 +316,24 @@ def refresh_recollection_status(c, snapshot_id):
     )
     c.execute(
         """UPDATE recollection_items
-           SET status=CASE
+           SET benchmark_status=CASE
+                 WHEN benchmark_avg_diff IS NULL OR abs_difference IS NULL THEN 'NO_BENCHMARK'
+                 WHEN abs_difference >= benchmark_avg_diff THEN 'MEETS_BENCHMARK'
+                 ELSE 'BELOW_BENCHMARK' END,
+               status=CASE
                  WHEN current_total IS NULL THEN 'HOLD'
                  WHEN ops_excluded=1 THEN 'EXCLUDED'
                  WHEN reviewed_excluded=1 THEN 'EXCLUDED'
                  WHEN assigned_excluded=1 THEN 'EXCLUDED'
-                 WHEN benchmark_avg_diff IS NULL THEN 'HOLD'
-                 WHEN difference <= 0 THEN 'DO_NOT_DISTRIBUTE'
-                 WHEN abs_difference < benchmark_avg_diff THEN 'DO_NOT_DISTRIBUTE'
-                 ELSE 'ELIGIBLE' END,
+                 WHEN difference > 0 THEN 'REVIEW_CANDIDATE'
+                 ELSE 'DO_NOT_DISTRIBUTE' END,
                exclusion_reason=CASE
                  WHEN current_total IS NULL THEN 'MISSING_CURRENT'
                  WHEN ops_excluded=1 THEN 'OPS_COMPLETED'
                  WHEN reviewed_excluded=1 THEN 'ALREADY_REVIEWED'
                  WHEN assigned_excluded=1 THEN 'ALREADY_ASSIGNED'
-                 WHEN benchmark_avg_diff IS NULL THEN 'MISSING_BENCHMARK'
-                 WHEN difference <= 0 THEN 'NO_POSITIVE_CHANGE'
-                 WHEN abs_difference < benchmark_avg_diff THEN 'BELOW_BENCHMARK'
-                 ELSE NULL END
+                 WHEN difference > 0 THEN NULL
+                 ELSE 'NO_POSITIVE_CHANGE' END
            WHERE run_id=?""",
         (run_id,)
     )
@@ -351,7 +357,7 @@ def recollection_counts(c, snapshot_id):
                   SUM(abs_difference>0) changed,
                   SUM(ops_excluded=1) ops_excluded,
                   SUM(reviewed_excluded=1) reviewed_excluded,
-                  SUM(status='ELIGIBLE') eligible,
+                  SUM(status='REVIEW_CANDIDATE') eligible,
                   SUM(status='HOLD') hold,
                   SUM(status='DO_NOT_DISTRIBUTE') do_not_distribute
            FROM recollection_items WHERE run_id=?""",
@@ -369,9 +375,12 @@ def recollection_queue_df(c, snapshot_id, eligible_only=True, limit=5000):
     where = "WHERE r.run_id=?"
     params = [rid]
     if eligible_only:
-        where += " AND r.status='ELIGIBLE'"
+        where += " AND r.status='REVIEW_CANDIDATE'"
     sql = f"""SELECT r.match_id,r.part_id,r.match_name,r.competition,r.recollection_total,
                      r.current_total,r.difference,r.abs_difference,r.benchmark_avg_diff,
+                     r.benchmark_status,
+                     CASE WHEN r.benchmark_avg_diff IS NOT NULL AND r.benchmark_avg_diff>0
+                          THEN ROUND(r.abs_difference / r.benchmark_avg_diff,2) ELSE NULL END AS benchmark_ratio,
                      r.severity,r.collection_completion,r.status,r.exclusion_reason,
                      CASE WHEN rp.match_id IS NULL THEN 'NO' ELSE 'YES' END reviewed_already,
                      CASE WHEN ra.match_id IS NULL THEN 'NO' ELSE 'YES' END assigned_already
@@ -405,9 +414,11 @@ def smart_assign_next_batch(c, snapshot_id, per_reviewer=6):
     rec_rows = c.execute(
         """SELECT match_id,part_id FROM recollection_items
            WHERE run_id=(SELECT id FROM recollection_runs ORDER BY id DESC LIMIT 1)
-             AND status='ELIGIBLE'
+             AND status='REVIEW_CANDIDATE'
              AND NOT EXISTS(SELECT 1 FROM review_assignments a WHERE a.snapshot_id=? AND a.match_id=recollection_items.match_id AND a.part_id=recollection_items.part_id)
-           ORDER BY severity_rank,abs_difference DESC,
+           ORDER BY severity_rank,
+                    CASE WHEN benchmark_status='MEETS_BENCHMARK' THEN 0 ELSE 1 END,
+                    abs_difference DESC,
                     CASE WHEN collection_completion IS NULL OR collection_completion='' THEN 1 ELSE 0 END,
                     collection_completion DESC,match_id,part_id""",
         (snapshot_id,)
