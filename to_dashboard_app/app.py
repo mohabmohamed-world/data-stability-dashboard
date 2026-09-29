@@ -413,20 +413,123 @@ def missing_page():
 
 def compare_page():
     st.title('🔄 Before vs After')
+    st.caption('Detailed Match + Part comparison — same style as Detailed Dashboard, with Before / After / Δ for all 10 duel metrics.')
     sid=current_snapshot_id()
-    if not sid: st.info('Import Base first.'); return
-    tabs=st.tabs(['Base comparison','Extras daily updates'])
-    with tabs[0]:
-        q=df('''SELECT match_id,part_id,event,before_count,after_count,difference,pct_change FROM snapshot_comparisons WHERE current_snapshot_id=? ORDER BY match_id,part_id,event''',(sid,))
-        ch=q[q.difference!=0] if not q.empty else q
-        st.metric('Changed Base event rows',f'{len(ch):,}'); st.dataframe(ch,use_container_width=True,hide_index=True)
-    with tabs[1]:
-        snaps=df("SELECT id,name,created_at FROM snapshots WHERE snapshot_type='DAILY' ORDER BY id DESC LIMIT 30")
-        if snaps.empty: st.info('No Extras daily updates yet.')
-        else:
-            labels={f"{r['id']} — {r['name']}":int(r['id']) for _,r in snaps.iterrows()}; choice=st.selectbox('Daily Extras update',list(labels)); dsid=labels[choice]
-            q=df('''SELECT ex_match_id,ex_part_id,tornado_extra,before_counter,after_counter,difference,before_collection_date,after_collection_date FROM extras_daily_changes WHERE snapshot_id=? ORDER BY ex_match_id,ex_part_id,tornado_extra''',(dsid,))
-            st.metric('Changed Extras rows',f"{int((q.difference!=0).sum()):,}"); st.dataframe(q,use_container_width=True,hide_index=True)
+    if not sid:
+        st.info('Import Base first.')
+        return
+
+    base_q=df('''SELECT s.match_id,s.part_id,s.match_name,s.competition,s.collection_completion,
+                        s.severity,
+                        c.event,c.before_count,c.after_count,c.difference
+                 FROM snapshot_comparisons c
+                 LEFT JOIN match_part_summary s
+                   ON s.snapshot_id=c.current_snapshot_id
+                  AND s.match_id=c.match_id AND s.part_id=c.part_id
+                 WHERE c.current_snapshot_id=?
+                 ORDER BY s.collection_completion DESC,s.match_id,s.part_id,c.event''',(sid,))
+    if base_q.empty:
+        st.info('No Base Before vs After data is available for the current snapshot.')
+        return
+
+    # Canonical names for the 8 Base events.
+    event_map={
+        'dribble':'Dribble',
+        'fifty fifty':'Fifty Fifty',
+        'fifty-fifty':'Fifty Fifty',
+        'hold up duel':'Hold Up Duel',
+        'hold-up-duel':'Hold Up Duel',
+        'leg stretch duel':'Leg Stretch Duel',
+        'leg-stretch-duel':'Leg Stretch Duel',
+        'positioning duel':'Positioning Duel',
+        'positioning-duel':'Positioning Duel',
+        'separation duel':'Separation Duel',
+        'separation-duel':'Separation Duel',
+        'shield':'Shield',
+        'tackle':'Tackle'
+    }
+
+    def canon_event(x):
+        k=str(x).strip().lower().replace('_',' ').replace('-',' ')
+        k=' '.join(k.split())
+        return event_map.get(k, str(x).strip())
+
+    base_q['metric']=base_q['event'].map(canon_event)
+    # Keep the base metrics only here; Extras are merged below from the latest daily snapshot.
+    base_keep=['Dribble','Fifty Fifty','Hold Up Duel','Leg Stretch Duel','Positioning Duel','Separation Duel','Shield','Tackle']
+    b=base_q[base_q['metric'].isin(base_keep)].copy()
+    meta=base_q[['match_id','part_id','match_name','competition','collection_completion','severity']].drop_duplicates()
+
+    before=b.pivot_table(index=['match_id','part_id'],columns='metric',values='before_count',aggfunc='sum',fill_value=0)
+    after=b.pivot_table(index=['match_id','part_id'],columns='metric',values='after_count',aggfunc='sum',fill_value=0)
+    before.columns=[f'{x} — Before' for x in before.columns]
+    after.columns=[f'{x} — After' for x in after.columns]
+    out=before.join(after,how='outer').reset_index()
+
+    # Add metadata.
+    out=meta.merge(out,on=['match_id','part_id'],how='right')
+
+    # Latest Extras daily snapshot, when available.
+    daily=df("SELECT id,name,created_at FROM snapshots WHERE snapshot_type='DAILY' ORDER BY id DESC LIMIT 1")
+    extra_metrics={'aerial won':'Aerial Won','aerial-won':'Aerial Won','step in':'Step In','step-in':'Step In'}
+    if not daily.empty:
+        dsid=int(daily.iloc[0]['id'])
+        ex=df('''SELECT ex_match_id AS match_id,ex_part_id AS part_id,tornado_extra,
+                         before_counter,after_counter,difference
+                  FROM extras_daily_changes
+                  WHERE snapshot_id=?''',(dsid,))
+        if not ex.empty:
+            ex['metric']=ex['tornado_extra'].map(lambda x: extra_metrics.get(str(x).strip().lower().replace('_',' ').replace('-',' '),str(x).strip()))
+            ex=ex[ex['metric'].isin(['Aerial Won','Step In'])]
+            eb=ex.pivot_table(index=['match_id','part_id'],columns='metric',values='before_counter',aggfunc='sum',fill_value=0)
+            ea=ex.pivot_table(index=['match_id','part_id'],columns='metric',values='after_counter',aggfunc='sum',fill_value=0)
+            eb.columns=[f'{x} — Before' for x in eb.columns]
+            ea.columns=[f'{x} — After' for x in ea.columns]
+            out=out.set_index(['match_id','part_id'])
+            out=out.join(eb,how='left').join(ea,how='left').reset_index()
+            st.info(f"Extras comparison is using the latest daily snapshot: {daily.iloc[0]['name']}.")
+
+    # Ensure all 10 metrics exist and are numeric.
+    metrics=['Dribble','Fifty Fifty','Hold Up Duel','Leg Stretch Duel','Positioning Duel','Separation Duel','Shield','Tackle','Aerial Won','Step In']
+    for m in metrics:
+        if f'{m} — Before' not in out.columns: out[f'{m} — Before']=0
+        if f'{m} — After' not in out.columns: out[f'{m} — After']=0
+        out[f'{m} — Before']=pd.to_numeric(out[f'{m} — Before'],errors='coerce').fillna(0)
+        out[f'{m} — After']=pd.to_numeric(out[f'{m} — After'],errors='coerce').fillna(0)
+
+    out['Total Duels — Before']=out[[f'{m} — Before' for m in metrics]].sum(axis=1)
+    out['Total Duels — After']=out[[f'{m} — After' for m in metrics]].sum(axis=1)
+    out['Δ Total Duels']=out['Total Duels — After']-out['Total Duels — Before']
+    out['Changed?']=out['Δ Total Duels'].ne(0)
+
+    a,b,c1,d=st.columns(4)
+    a.metric('Match + Part',f"{len(out):,}")
+    b.metric('Changed Halves',f"{int(out['Changed?'].sum()):,}")
+    c1.metric('Total Δ',f"{int(out['Δ Total Duels'].sum()):+,}")
+    d.metric('Avg Δ',f"{out['Δ Total Duels'].mean():+.2f}")
+
+    comp_opts=sorted([str(x) for x in out['competition'].dropna().unique().tolist() if str(x).strip()])
+    comp=a.multiselect('Competition',comp_opts,key='compare_comp')
+    only_changed=b.checkbox('Show changed only',value=False,key='compare_changed')
+    min_abs=c1.number_input('Min |Δ Total Duels|',0,1000,0,key='compare_min_delta')
+    max_rows=d.number_input('Rows',50,5000,500,key='compare_rows')
+
+    if comp: out=out[out['competition'].isin(comp)]
+    if only_changed: out=out[out['Changed?']]
+    if min_abs: out=out[out['Δ Total Duels'].abs()>=min_abs]
+
+    out=out.sort_values(['Changed?','Δ Total Duels','collection_completion'],ascending=[False,False,False])
+
+    display=['match_id','part_id','match_name','competition','collection_completion','severity']
+    for m in metrics:
+        display += [f'{m} — Before',f'{m} — After']
+    display += ['Total Duels — Before','Total Duels — After','Δ Total Duels','Changed?']
+
+    st.write(f'{min(len(out),int(max_rows)):,} rows shown')
+    st.dataframe(out[display].head(int(max_rows)),use_container_width=True,hide_index=True)
+    st.download_button('📥 Export Detailed Before vs After',
+                       out[display].to_csv(index=False).encode('utf-8-sig'),
+                       file_name='to_dashboard_before_vs_after_detailed.csv',mime='text/csv')
 
 page=st.sidebar.radio('Navigation',['📊 Dashboard','🔎 Detailed Dashboard','📥 Import / Update','📋 Review Queue','🔄 Review Lifecycle','⚠️ Missing Metadata','🔄 Before vs After'])
 if page=='📊 Dashboard': dashboard()
