@@ -374,6 +374,31 @@ def import_distributed_parts(c, df, snapshot_id, source_name="Manual Distributio
     return inserted
 
 
+
+def recollection_funnel(c, snapshot_id):
+    refresh_recollection_status(c, snapshot_id)
+    rid = _latest_run_id(c)
+    if not rid:
+        return pd.DataFrame(columns=["Stage","Count"])
+    rows = c.execute(
+        """SELECT exclusion_reason, COUNT(*) FROM recollection_items
+           WHERE run_id=?
+           GROUP BY exclusion_reason""",
+        (rid,)
+    ).fetchall()
+    reason_counts = {str(k) if k is not None else "__CANDIDATE__": int(v or 0) for k,v in rows}
+    stages = [
+        ("Total Recollection", int(c.execute("SELECT COUNT(*) FROM recollection_items WHERE run_id=?", (rid,)).fetchone()[0] or 0)),
+        ("Missing Current", reason_counts.get("MISSING_CURRENT", 0)),
+        ("No Positive Change", reason_counts.get("NO_POSITIVE_CHANGE", 0)),
+        ("Excluded — Ops Completed", reason_counts.get("OPS_COMPLETED", 0)),
+        ("Excluded — Already Reviewed", reason_counts.get("ALREADY_REVIEWED", 0)),
+        ("Excluded — Already Assigned", reason_counts.get("ALREADY_ASSIGNED", 0)),
+        ("Review Candidates", int(c.execute("SELECT COUNT(*) FROM recollection_items WHERE run_id=? AND status='REVIEW_CANDIDATE'", (rid,)).fetchone()[0] or 0)),
+    ]
+    return pd.DataFrame(stages, columns=["Stage","Count"])
+
+
 def latest_run(c):
     ensure_recollection_tables(c)
     row = c.execute("SELECT id,source_name,uploaded_at,rows_read,rows_loaded FROM recollection_runs ORDER BY id DESC LIMIT 1").fetchone()
@@ -424,7 +449,9 @@ def recollection_queue_df(c, snapshot_id, eligible_only=True, limit=5000):
               LEFT JOIN reviewed_parts rp ON rp.match_id=r.match_id AND rp.part_id=r.part_id
               LEFT JOIN review_assignments ra ON ra.snapshot_id=? AND ra.match_id=r.match_id AND ra.part_id=r.part_id
               {where}
-              ORDER BY r.severity_rank,r.abs_difference DESC,
+              ORDER BY r.severity_rank,
+                       CASE WHEN r.benchmark_status='MEETS_BENCHMARK' THEN 0 ELSE 1 END,
+                       r.abs_difference DESC,
                        CASE WHEN r.collection_completion IS NULL OR r.collection_completion='' THEN 1 ELSE 0 END,
                        r.collection_completion DESC,r.match_id,r.part_id LIMIT ?"""
     return pd.read_sql_query(sql, c, params=[snapshot_id,*params,int(limit)])
