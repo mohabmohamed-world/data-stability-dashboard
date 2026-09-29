@@ -88,4 +88,10 @@ CREATE TABLE IF NOT EXISTS review_history(
  action TEXT NOT NULL, snapshot_id INTEGER, reviewer_code TEXT, before_total REAL, after_total REAL,
  changed_event_count INTEGER DEFAULT 0, note TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 
+CREATE TABLE IF NOT EXISTS reviewed_parts(
+ match_id INTEGER NOT NULL, part_id INTEGER NOT NULL, reviewer_name TEXT, review_date TEXT,
+ source_name TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(match_id,part_id));
+CREATE INDEX IF NOT EXISTS idx_reviewed_parts_key ON reviewed_parts(match_id,part_id);
+
 CREATE INDEX IF NOT EXISTS idx_summary_queue ON match_part_summary(snapshot_id,severity_rank,collection_completion,total_duels);
