@@ -417,14 +417,15 @@ def queue_page():
             st.error(f'❌ Assignment failed: {e}')
 
     st.subheader('Current Assignments')
-    assignments=df('''SELECT a.reviewer_code,r.name,r.team,a.match_id,a.part_id,
+    assignments=df('''SELECT a.reviewer_code,COALESCE(r.name,'Manual Distribution') AS name,COALESCE(r.team,'—') AS team,
+                             a.match_id,a.part_id,
                              s.match_name,s.competition,s.severity,s.total_duels,
                              a.source,a.status,a.complete_flag,a.assigned_at
                       FROM review_assignments a
-                      JOIN reviewers r ON r.code=a.reviewer_code
+                      LEFT JOIN reviewers r ON r.code=a.reviewer_code
                       JOIN match_part_summary s ON s.snapshot_id=a.snapshot_id AND s.match_id=a.match_id AND s.part_id=a.part_id
                       WHERE a.snapshot_id=?
-                      ORDER BY r.code,a.assigned_at''',(sid,))
+                      ORDER BY COALESCE(r.code,'MANUAL'),a.assigned_at''',(sid,))
     st.dataframe(assignments,use_container_width=True,hide_index=True)
 
 def review_lifecycle_page():
