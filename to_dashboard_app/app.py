@@ -5,7 +5,7 @@ import os
 import pandas as pd
 import streamlit as st
 
-from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
+from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
 
 APP_DIR=Path(__file__).resolve().parent
 # Streamlit Community Cloud uses a mounted source tree that is not a good place
@@ -72,6 +72,9 @@ def scalar(sql, params=()):
 def extras_initialized():
     return scalar('SELECT COUNT(*) FROM extras_current') > 0
 
+def reviewed_parts_count():
+    return scalar('SELECT COUNT(*) FROM reviewed_parts')
+
 
 def current_snapshot_id():
     c=conn()
@@ -86,6 +89,7 @@ def assign_next_batch(sid):
     q=c.execute('''SELECT s.match_id,s.part_id FROM match_part_summary s
                    WHERE s.snapshot_id=? AND s.total_duels<60
                      AND NOT EXISTS (SELECT 1 FROM review_assignments a WHERE a.snapshot_id=s.snapshot_id AND a.match_id=s.match_id AND a.part_id=s.part_id)
+                     AND NOT EXISTS (SELECT 1 FROM reviewed_parts rp WHERE rp.match_id=s.match_id AND rp.part_id=s.part_id)
                    ORDER BY s.severity_rank,
                             CASE WHEN s.collection_completion IS NULL OR s.collection_completion='' THEN 1 ELSE 0 END,
                             s.collection_completion DESC,s.match_id,s.part_id''',(sid,)).fetchall()
@@ -218,6 +222,19 @@ def import_page():
             except Exception as e: st.error(f'Extras seed failed: {e}')
 
     st.divider()
+    st.subheader('🧾 Reviewed Matches — exclusion list')
+    st.caption('Upload your latest Reviewed Matches file. Exact Match ID + Part ID keys will be excluded from distribution.')
+    reviewed_ref=st.file_uploader('Upload Reviewed Matches',type=['csv','tsv','txt'],key='reviewed_reference')
+    if reviewed_ref and st.button('📥 Load Reviewed Matches',type='primary',key='load_reviewed_reference'):
+        try:
+            c=conn(); n=import_reviewed_parts(c,read_table_bytes(reviewed_ref.getvalue(),reviewed_ref.name),reviewed_ref.name); c.close()
+            st.success(f'✅ Loaded {n:,} reviewed Match + Part keys. These halves will be excluded from distribution.')
+            st.rerun()
+        except Exception as e: st.error(f'❌ Reviewed Matches import failed: {e}')
+    if reviewed_parts_count():
+        st.info(f'Current exclusion list: {reviewed_parts_count():,} reviewed Match + Part keys.')
+
+    st.divider()
     st.subheader('1) Base — full Tableau export')
     base=st.file_uploader('Upload Base (full history, Before + After in the same file)',type=['csv','tsv','txt'],key='base_full')
     st.caption('Every Base upload is the latest full Tableau export and becomes the new CURRENT snapshot. Older snapshots remain available for comparison/history.')
@@ -276,6 +293,7 @@ def queue_page():
     ph=','.join('?'*len(sev)); q=df(f'''SELECT s.match_id,s.part_id,s.match_name,s.competition,s.collection_completion,s.severity,s.total_duels,a.reviewer_code,a.status,a.complete_flag
         FROM match_part_summary s LEFT JOIN review_assignments a ON a.snapshot_id=s.snapshot_id AND a.match_id=s.match_id AND a.part_id=s.part_id
         WHERE s.snapshot_id=? AND s.severity IN ({ph}) AND s.total_duels<=?
+          AND NOT EXISTS (SELECT 1 FROM reviewed_parts rp WHERE rp.match_id=s.match_id AND rp.part_id=s.part_id)
         ORDER BY s.severity_rank,CASE WHEN s.collection_completion IS NULL OR s.collection_completion='' THEN 1 ELSE 0 END,s.collection_completion DESC,s.match_id,s.part_id LIMIT ?''',[sid,*sev,maxd,limit])
     st.write(f'{len(q):,} rows shown'); st.dataframe(q,use_container_width=True,hide_index=True)
     if st.button('🎯 Assign Next Batch (6 × each reviewer)',type='primary'):
