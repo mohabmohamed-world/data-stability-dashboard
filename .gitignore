@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.zip
+.env
+.venv/
+venv/
+.DS_Store
