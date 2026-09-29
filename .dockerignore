@@ -1,0 +1,16 @@
+.git
+.gitignore
+__pycache__
+*.py[cod]
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.zip
+.env
+.venv
+venv
