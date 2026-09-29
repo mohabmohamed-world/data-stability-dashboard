@@ -16,11 +16,20 @@ st.set_page_config(page_title='TO Dashboard', page_icon='⚽', layout='wide')
 
 
 def conn():
-    c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; c.execute('PRAGMA foreign_keys=ON'); c.executescript(SCHEMA.read_text(encoding='utf-8'))
-    # Lightweight migration for databases created by older V1.x builds.
+    # Avoid rerunning the full schema script against an already-populated SQLite DB on every Streamlit rerun.
+    # This can trigger SQLite locking/DDL issues on Streamlit Cloud. Initialize the schema only when needed.
+    c=sqlite3.connect(DB, timeout=30)
+    c.row_factory=sqlite3.Row
+    c.execute('PRAGMA foreign_keys=ON')
+    has_schema = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshots' LIMIT 1").fetchone()
+    if not has_schema:
+        c.executescript(SCHEMA.read_text(encoding='utf-8'))
+    # Lightweight migrations for databases created by older V1.x builds.
     cols={r[1] for r in c.execute('PRAGMA table_info(review_batch_items)').fetchall()}
-    if 'data_updated' not in cols: c.execute('ALTER TABLE review_batch_items ADD COLUMN data_updated INTEGER DEFAULT 1')
-    c.commit(); return c
+    if cols and 'data_updated' not in cols:
+        c.execute('ALTER TABLE review_batch_items ADD COLUMN data_updated INTEGER DEFAULT 1')
+    c.commit()
+    return c
 
 
 def df(sql, params=()):
