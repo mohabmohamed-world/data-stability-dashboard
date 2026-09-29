@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
-from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, import_distributed_parts, latest_run, recollection_counts, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
+from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, import_distributed_parts, latest_run, recollection_counts, recollection_funnel, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
 
 APP_DIR=Path(__file__).resolve().parent
 # Streamlit Community Cloud uses a mounted source tree that is not a good place
@@ -327,6 +327,7 @@ def queue_page():
         run=latest_run(c0)
         rc=recollection_counts(c0,sid)
         rec_q=recollection_queue_df(c0,sid,eligible_only=True,limit=5000)
+        funnel=recollection_funnel(c0,sid)
         review_excluded=scalar('SELECT COUNT(*) FROM reviewed_parts')
         reviewers_count=c0.execute('SELECT COUNT(*) FROM reviewers').fetchone()[0]
         assigned_rows=c0.execute("SELECT COUNT(*) FROM review_assignments WHERE snapshot_id=? AND status NOT IN ('CANCELLED')",(sid,)).fetchone()[0]
@@ -342,12 +343,16 @@ def queue_page():
         m4.metric('Reviewed Excluded',f"{rc['reviewed_excluded']:,}")
         m5.metric('Review Candidates',f"{rc['eligible']:,}")
         if rc['hold']:
-            st.warning(f"⚠️ {rc['hold']:,} Recollection rows are on HOLD (missing benchmark or current dashboard match).")
+            st.warning(f"⚠️ {rc['hold']:,} Recollection rows are on HOLD because the Match + Part is missing from the Current Dashboard.")
         cstat1,cstat2,cstat3=st.columns(3)
         cstat1.metric('Meets Benchmark',f"{rc['meets_benchmark']:,}")
         cstat2.metric('Below Benchmark',f"{rc['below_benchmark']:,}")
         cstat3.metric('No Positive Change',f"{rc['do_not_distribute']:,}")
         st.caption('Below Benchmark لا يعني الاستبعاد؛ هو فقط مؤشر إن التغيير أقل من متوسط الـCompetition benchmark.')
+        st.subheader('Recollection Funnel — non-overlapping')
+        st.dataframe(funnel,use_container_width=True,hide_index=True)
+        st.caption('الأرقام هنا مراحل منفصلة حتى ما يحصلش double counting بين Ops / Reviewed / Assigned / Candidates.')
+
         dist_up=st.file_uploader('Sync Manual Distribution (optional)',type=['csv','tsv','txt'],key='manual_distribution_upload')
         if dist_up and st.button('🔄 Sync Already Distributed Halves',key='sync_manual_distribution'):
             try:
@@ -360,8 +365,8 @@ def queue_page():
         if not rec_q.empty:
             st.write(f"{len(rec_q):,} Recollection candidates available for distribution.")
             st.dataframe(rec_q,use_container_width=True,hide_index=True)
-            st.download_button('📥 Export Eligible Recollection Queue',rec_q.to_csv(index=False).encode('utf-8-sig'),
-                               file_name='recollection_review_queue.csv',mime='text/csv')
+            st.download_button('📥 Export Recollection Candidate Queue',rec_q.to_csv(index=False).encode('utf-8-sig'),
+                               file_name='recollection_candidate_queue.csv',mime='text/csv')
         else:
             st.success('No Recollection candidates are currently available for distribution.')
     else:
