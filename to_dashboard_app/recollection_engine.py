@@ -375,29 +375,45 @@ def import_distributed_parts(c, df, snapshot_id, source_name="Manual Distributio
 
 
 
+
 def recollection_funnel(c, snapshot_id):
     refresh_recollection_status(c, snapshot_id)
     rid = _latest_run_id(c)
     if not rid:
         return pd.DataFrame(columns=["Stage","Count"])
-    rows = c.execute(
-        """SELECT exclusion_reason, COUNT(*) FROM recollection_items
+
+    q = c.execute(
+        """SELECT
+             CASE
+               WHEN ops_excluded=1 THEN 'Excluded — Ops Completed'
+               WHEN reviewed_excluded=1 THEN 'Excluded — Already Reviewed'
+               WHEN assigned_excluded=1 THEN 'Excluded — Already Assigned'
+               WHEN current_total IS NULL THEN 'Missing Current'
+               WHEN difference <= 0 THEN 'No Positive Change'
+               WHEN status='REVIEW_CANDIDATE' THEN 'Review Candidates'
+               ELSE 'Other'
+             END AS stage,
+             COUNT(*) AS count
+           FROM recollection_items
            WHERE run_id=?
-           GROUP BY exclusion_reason""",
+           GROUP BY stage""",
         (rid,)
     ).fetchall()
-    reason_counts = {str(k) if k is not None else "__CANDIDATE__": int(v or 0) for k,v in rows}
+
+    counts = {str(r[0]): int(r[1] or 0) for r in q}
     stages = [
-        ("Total Recollection", int(c.execute("SELECT COUNT(*) FROM recollection_items WHERE run_id=?", (rid,)).fetchone()[0] or 0)),
-        ("Missing Current", reason_counts.get("MISSING_CURRENT", 0)),
-        ("No Positive Change", reason_counts.get("NO_POSITIVE_CHANGE", 0)),
-        ("Excluded — Ops Completed", reason_counts.get("OPS_COMPLETED", 0)),
-        ("Excluded — Already Reviewed", reason_counts.get("ALREADY_REVIEWED", 0)),
-        ("Excluded — Already Assigned", reason_counts.get("ALREADY_ASSIGNED", 0)),
-        ("Review Candidates", int(c.execute("SELECT COUNT(*) FROM recollection_items WHERE run_id=? AND status='REVIEW_CANDIDATE'", (rid,)).fetchone()[0] or 0)),
+        ("Total Recollection", int(c.execute(
+            "SELECT COUNT(*) FROM recollection_items WHERE run_id=?", (rid,)
+        ).fetchone()[0] or 0)),
+        ("Excluded — Ops Completed", counts.get("Excluded — Ops Completed", 0)),
+        ("Excluded — Already Reviewed", counts.get("Excluded — Already Reviewed", 0)),
+        ("Excluded — Already Assigned", counts.get("Excluded — Already Assigned", 0)),
+        ("Missing Current", counts.get("Missing Current", 0)),
+        ("No Positive Change", counts.get("No Positive Change", 0)),
+        ("Review Candidates", counts.get("Review Candidates", 0)),
+        ("Other", counts.get("Other", 0)),
     ]
     return pd.DataFrame(stages, columns=["Stage","Count"])
-
 
 def latest_run(c):
     ensure_recollection_tables(c)
