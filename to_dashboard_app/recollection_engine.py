@@ -13,11 +13,17 @@ def _norm(x):
 
 
 def _pick(df, *names):
-    cols = {_norm(c): c for c in df.columns}
+    cols = {}
+    for c in df.columns:
+        cols[_norm(c)] = c
+        cols[re.sub(r"[^a-z0-9]+","_",str(c).strip().lower()).strip("_")] = c
     for n in names:
         nn = _norm(n)
+        nk = re.sub(r"[^a-z0-9]+","_",str(n).strip().lower()).strip("_")
         if nn in cols:
             return cols[nn]
+        if nk in cols:
+            return cols[nk]
     return None
 
 
