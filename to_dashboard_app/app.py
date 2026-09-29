@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
+from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, latest_run, recollection_counts, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
 
 APP_DIR=Path(__file__).resolve().parent
 # Streamlit Community Cloud uses a mounted source tree that is not a good place
@@ -59,6 +60,7 @@ def conn():
         review_date TEXT, source_name TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY(match_id,part_id))''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_reviewed_parts_key ON reviewed_parts(match_id,part_id)')
+    ensure_recollection_tables(c)
     cols={r[1] for r in c.execute('PRAGMA table_info(review_batch_items)').fetchall()}
     if cols and 'data_updated' not in cols:
         c.execute('ALTER TABLE review_batch_items ADD COLUMN data_updated INTEGER DEFAULT 1')
@@ -89,21 +91,11 @@ def current_snapshot_id():
 
 
 def assign_next_batch(sid):
-    c=conn(); reviewers=c.execute('SELECT code FROM reviewers ORDER BY code').fetchall();
-    if not reviewers: c.close(); return 0
-    q=c.execute('''SELECT s.match_id,s.part_id FROM match_part_summary s
-                   WHERE s.snapshot_id=? AND s.total_duels<60
-                     AND NOT EXISTS (SELECT 1 FROM review_assignments a WHERE a.snapshot_id=s.snapshot_id AND a.match_id=s.match_id AND a.part_id=s.part_id)
-                     AND NOT EXISTS (SELECT 1 FROM reviewed_parts rp WHERE rp.match_id=s.match_id AND rp.part_id=s.part_id)
-                   ORDER BY s.severity_rank,
-                            CASE WHEN s.collection_completion IS NULL OR s.collection_completion='' THEN 1 ELSE 0 END,
-                            s.collection_completion DESC,s.match_id,s.part_id''',(sid,)).fetchall()
-    q=q[:len(reviewers)*6]; now=datetime.now().isoformat(timespec='seconds'); rows=[]; idx=0
-    for r in reviewers:
-        for _ in range(6):
-            if idx>=len(q): break
-            rows.append((sid,r['code'],q[idx]['match_id'],q[idx]['part_id'],now,'ASSIGNED','AUTO')); idx+=1
-    c.executemany('INSERT OR IGNORE INTO review_assignments(snapshot_id,reviewer_code,match_id,part_id,assigned_at,status,source) VALUES(?,?,?,?,?,?,?)',rows); c.commit(); c.close(); return len(rows)
+    c=conn()
+    try:
+        return smart_assign_next_batch(c,sid)
+    finally:
+        c.close()
 
 
 def dashboard():
@@ -292,19 +284,128 @@ def import_page():
 def queue_page():
     st.title('📋 Review Queue')
     sid=current_snapshot_id()
-    if not sid: st.info('Import Base first.'); return
-    a,b,c=st.columns(3); sev=a.multiselect('Severity',SEVERITY_ORDER,default=SEVERITY_ORDER); maxd=b.number_input('Max Total Duels',1,1000,59); limit=c.number_input('Rows',10,1000,200)
-    if not sev: st.warning('Select at least one severity.'); return
-    ph=','.join('?'*len(sev)); q=df(f'''SELECT s.match_id,s.part_id,s.match_name,s.competition,s.collection_completion,s.severity,s.total_duels,a.reviewer_code,a.status,a.complete_flag
-        FROM match_part_summary s LEFT JOIN review_assignments a ON a.snapshot_id=s.snapshot_id AND a.match_id=s.match_id AND a.part_id=s.part_id
+    if not sid:
+        st.info('Import Base first.')
+        return
+
+    # Recollection input + decision layer.
+    st.subheader('🔁 Recollection Review')
+    st.caption('ارفع Recollection الجديدة + Ops Completed Recollection + Competition Benchmark. النظام يطابق Match ID + Part ويطبّق قاعدة Review Again تلقائياً: change > 0 و Absolute Difference >= Competition Benchmark Average Diff.')
+
+    u1,u2,u3=st.columns(3)
+    with u1:
+        rec_up=st.file_uploader('Recollection file',type=['csv','tsv','txt'],key='recollection_queue_upload')
+        if rec_up and st.button('📥 Load Recollection',key='load_recollection_queue',type='primary'):
+            try:
+                c=conn(); rid,n=import_recollection(c,read_table_bytes(rec_up.getvalue(),rec_up.name),sid,rec_up.name); c.close()
+                st.success(f'✅ Loaded Recollection: {n:,} Match + Part rows.')
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Recollection import failed: {e}')
+    with u2:
+        ops_up=st.file_uploader('Ops Completed Recollection',type=['csv','tsv','txt'],key='recollection_ops_upload')
+        if ops_up and st.button('🚫 Load Ops Exclusions',key='load_recollection_ops'):
+            try:
+                c=conn(); n=import_recollection_ops(c,read_table_bytes(ops_up.getvalue(),ops_up.name),ops_up.name); c.close()
+                st.success(f'✅ Loaded {n:,} Ops-completed Match + Part exclusions.')
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Ops exclusion import failed: {e}')
+    with u3:
+        bm_up=st.file_uploader('Competition Benchmark',type=['csv','tsv','txt'],key='recollection_benchmark_upload')
+        if bm_up and st.button('📏 Load Competition Benchmark',key='load_recollection_benchmark'):
+            try:
+                c=conn(); n=import_recollection_benchmark(c,read_table_bytes(bm_up.getvalue(),bm_up.name),bm_up.name); c.close()
+                st.success(f'✅ Loaded {n:,} competition benchmark rows.')
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Benchmark import failed: {e}')
+
+    c0=conn()
+    try:
+        refresh_recollection_status(c0,sid)
+        run=latest_run(c0)
+        rc=recollection_counts(c0,sid)
+        rec_q=recollection_queue_df(c0,sid,eligible_only=True,limit=5000)
+        review_excluded=scalar('SELECT COUNT(*) FROM reviewed_parts')
+        reviewers_count=c0.execute('SELECT COUNT(*) FROM reviewers').fetchone()[0]
+        assigned_rows=c0.execute("SELECT COUNT(*) FROM review_assignments WHERE snapshot_id=? AND status NOT IN ('CANCELLED')",(sid,)).fetchone()[0]
+    finally:
+        c0.close()
+
+    if run:
+        st.info(f"Current Recollection: **{run['source_name']}** — {int(run['rows_loaded']):,} unique Match + Part rows loaded.")
+        m1,m2,m3,m4,m5=st.columns(5)
+        m1.metric('Recollection',f"{rc['total']:,}")
+        m2.metric('Changed',f"{rc['changed']:,}")
+        m3.metric('Ops Excluded',f"{rc['ops_excluded']:,}")
+        m4.metric('Reviewed Excluded',f"{rc['reviewed_excluded']:,}")
+        m5.metric('Eligible Recollection',f"{rc['eligible']:,}")
+        if rc['hold']:
+            st.warning(f"⚠️ {rc['hold']:,} Recollection rows are on HOLD (missing benchmark or current dashboard match).")
+        if not rec_q.empty:
+            st.dataframe(rec_q,use_container_width=True,hide_index=True)
+            st.download_button('📥 Export Eligible Recollection Queue',rec_q.to_csv(index=False).encode('utf-8-sig'),
+                               file_name='recollection_review_queue.csv',mime='text/csv')
+        else:
+            st.success('No Recollection halves are currently eligible for distribution.')
+    else:
+        st.warning('⚠️ No Recollection file loaded yet. Upload it above before using Assign Next Batch.')
+
+    st.divider()
+    st.subheader('📋 Normal Review Queue')
+    a,b,c=st.columns(3)
+    sev=a.multiselect('Severity',SEVERITY_ORDER,default=SEVERITY_ORDER,key='normal_queue_severity')
+    maxd=b.number_input('Max Total Duels',1,1000,59,key='normal_queue_max_duels')
+    limit=c.number_input('Rows',10,1000,200,key='normal_queue_rows')
+    if not sev:
+        st.warning('Select at least one severity.')
+        return
+
+    ph=','.join('?'*len(sev))
+    normal_q=df(f'''SELECT s.match_id,s.part_id,s.match_name,s.competition,s.collection_completion,s.severity,s.total_duels,a.reviewer_code,a.status,a.complete_flag
+        FROM match_part_summary s
+        LEFT JOIN review_assignments a ON a.snapshot_id=s.snapshot_id AND a.match_id=s.match_id AND a.part_id=s.part_id
         WHERE s.snapshot_id=? AND s.severity IN ({ph}) AND s.total_duels<=?
           AND NOT EXISTS (SELECT 1 FROM reviewed_parts rp WHERE rp.match_id=s.match_id AND rp.part_id=s.part_id)
-        ORDER BY s.severity_rank,CASE WHEN s.collection_completion IS NULL OR s.collection_completion='' THEN 1 ELSE 0 END,s.collection_completion DESC,s.match_id,s.part_id LIMIT ?''',[sid,*sev,maxd,limit])
-    st.write(f'{len(q):,} rows shown'); st.dataframe(q,use_container_width=True,hide_index=True)
-    if st.button('🎯 Assign Next Batch (6 × each reviewer)',type='primary'):
-        n=assign_next_batch(sid); st.success(f'Assigned {n} halves.'); st.rerun()
-    st.subheader('Current Assignments'); st.dataframe(df('''SELECT a.reviewer_code,r.name,r.team,a.match_id,a.part_id,s.severity,s.total_duels,a.status,a.complete_flag,a.assigned_at FROM review_assignments a JOIN reviewers r ON r.code=a.reviewer_code JOIN match_part_summary s ON s.snapshot_id=a.snapshot_id AND s.match_id=a.match_id AND s.part_id=a.part_id WHERE a.snapshot_id=? ORDER BY r.code,a.assigned_at''',(sid,)),use_container_width=True,hide_index=True)
+          AND NOT EXISTS (SELECT 1 FROM recollection_ops_exclusions oe WHERE oe.match_id=s.match_id AND oe.part_id=s.part_id)
+          AND NOT EXISTS (
+              SELECT 1 FROM recollection_items ri
+              WHERE ri.run_id=(SELECT id FROM recollection_runs ORDER BY id DESC LIMIT 1)
+                AND ri.match_id=s.match_id AND ri.part_id=s.part_id
+          )
+        ORDER BY s.severity_rank,
+                 CASE WHEN s.collection_completion IS NULL OR s.collection_completion='' THEN 1 ELSE 0 END,
+                 s.collection_completion DESC,s.match_id,s.part_id LIMIT ?''',
+        [sid,*sev,maxd,limit])
+    st.write(f'{len(normal_q):,} rows shown')
+    st.dataframe(normal_q,use_container_width=True,hide_index=True)
 
+    st.divider()
+    st.subheader('🎯 Smart Assignment')
+    cap_col,ass_col,btn_col=st.columns(3)
+    cap_col.metric('Reviewers',f'{reviewers_count:,}')
+    cap_col.caption('Capacity = 6 halves per reviewer')
+    ass_col.metric('Assigned Today / Current Snapshot',f'{assigned_rows:,} / {reviewers_count*6:,}')
+    ass_col.caption('Existing assignments stay protected; Assign Next Batch only fills remaining reviewer capacity.')
+    if btn_col.button('🎯 Assign Next Batch',type='primary',key='smart_assign_next_batch'):
+        try:
+            result=assign_next_batch(sid)
+            st.success(f"Assigned {result['assigned']} halves — Recollection: {result['recollection_assigned']} | Normal: {result['normal_assigned']} | Capacity available before assignment: {result['capacity']}.")
+            st.rerun()
+        except Exception as e:
+            st.error(f'❌ Assignment failed: {e}')
+
+    st.subheader('Current Assignments')
+    assignments=df('''SELECT a.reviewer_code,r.name,r.team,a.match_id,a.part_id,
+                             s.match_name,s.competition,s.severity,s.total_duels,
+                             a.source,a.status,a.complete_flag,a.assigned_at
+                      FROM review_assignments a
+                      JOIN reviewers r ON r.code=a.reviewer_code
+                      JOIN match_part_summary s ON s.snapshot_id=a.snapshot_id AND s.match_id=a.match_id AND s.part_id=a.part_id
+                      WHERE a.snapshot_id=?
+                      ORDER BY r.code,a.assigned_at''',(sid,))
+    st.dataframe(assignments,use_container_width=True,hide_index=True)
 
 def review_lifecycle_page():
     st.title('🔄 Review Lifecycle')
