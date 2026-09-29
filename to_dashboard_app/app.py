@@ -104,7 +104,17 @@ def import_page():
             DB.parent.mkdir(parents=True, exist_ok=True)
             if DB.exists():
                 shutil.copy2(DB, str(DB)+'.before_restore')
-            os.replace(tmp_path, DB)
+            # Streamlit Cloud may mount /tmp and the app directory on different filesystems.
+            # Copy instead of os.replace() so cross-device restores work reliably.
+            shutil.copyfile(tmp_path, DB)
+            try:
+                os.sync()
+            except Exception:
+                pass
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
             st.success(f'✅ Database restored successfully — {current_count:,} Match + Part rows loaded.')
             st.rerun()
         except Exception as e:
