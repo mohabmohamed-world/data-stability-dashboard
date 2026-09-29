@@ -8,7 +8,11 @@ import streamlit as st
 from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
 
 APP_DIR=Path(__file__).resolve().parent
-DB=Path(os.getenv('TO_DB_PATH', str(APP_DIR/'to_dashboard.db')))
+# Streamlit Community Cloud uses a mounted source tree that is not a good place
+# for a frequently-written SQLite database. Keep the working DB under /tmp for
+# the current cloud trial, unless an explicit TO_DB_PATH is provided.
+DEFAULT_DB = '/tmp/to_dashboard.db' if str(APP_DIR).startswith('/mount/src/') else str(APP_DIR/'to_dashboard.db')
+DB=Path(os.getenv('TO_DB_PATH', DEFAULT_DB))
 DB.parent.mkdir(parents=True, exist_ok=True)
 SCHEMA=APP_DIR/'schema.sql'
 
@@ -18,9 +22,11 @@ st.set_page_config(page_title='TO Dashboard', page_icon='⚽', layout='wide')
 def conn():
     # Avoid rerunning the full schema script against an already-populated SQLite DB on every Streamlit rerun.
     # This can trigger SQLite locking/DDL issues on Streamlit Cloud. Initialize the schema only when needed.
-    c=sqlite3.connect(DB, timeout=30)
+    c=sqlite3.connect(DB, timeout=60)
     c.row_factory=sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON')
+    c.execute('PRAGMA journal_mode=DELETE')
+    c.execute('PRAGMA synchronous=FULL')
     has_schema = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshots' LIMIT 1").fetchone()
     if not has_schema:
         c.executescript(SCHEMA.read_text(encoding='utf-8'))
