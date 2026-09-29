@@ -78,8 +78,18 @@ def dashboard():
     st.title('📊 TO Dashboard')
     sid=current_snapshot_id()
     if not sid: st.info('ابدأ برفع Base + Matches Info.'); return
-    x=df('''SELECT COUNT(*) halves,SUM(total_duels<60) eligible,SUM(metadata_missing) missing FROM match_part_summary WHERE snapshot_id=?''',(sid,)).iloc[0]
-    a,b,c=st.columns(3); a.metric('Match + Part',f"{int(x.halves):,}"); b.metric('Eligible < 60',f"{int(x.eligible):,}"); c.metric('Missing Metadata',f"{int(x.missing):,}")
+    x=df('''SELECT COUNT(*) halves,COALESCE(SUM(CASE WHEN total_duels<60 THEN 1 ELSE 0 END),0) eligible,COALESCE(SUM(metadata_missing),0) missing FROM match_part_summary WHERE snapshot_id=?''',(sid,)).iloc[0]
+    halves=int(x['halves'] or 0); eligible=int(x['eligible'] or 0); missing=int(x['missing'] or 0)
+    if halves == 0:
+        st.warning('⚠️ يوجد CURRENT snapshot لكن لم يتم بناء Match + Part Summary بعد. راجع Latest Imports لمعرفة نتيجة آخر Run.')
+        latest=df('SELECT import_type,source_name,status,rows_read,rows_inserted,warnings_count,started_at,completed_at,error_message FROM imports ORDER BY id DESC LIMIT 10')
+        st.subheader('Latest Imports')
+        st.dataframe(latest,use_container_width=True,hide_index=True)
+        return
+    a,b,c=st.columns(3)
+    a.metric('Match + Part',f"{halves:,}")
+    b.metric('Eligible < 60',f"{eligible:,}")
+    c.metric('Missing Metadata',f"{missing:,}")
     st.subheader('Data Status')
     e1,e2=st.columns(2)
     with e1:
