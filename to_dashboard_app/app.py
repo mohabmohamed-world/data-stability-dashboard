@@ -99,6 +99,7 @@ def assign_next_batch(sid):
 
 def dashboard():
     st.title('📊 TO Dashboard')
+st.caption('Summary logic: v2.1 — canonical duel-name normalization')
     sid=current_snapshot_id()
     if not sid: st.info('ابدأ برفع Base + Matches Info.'); return
     x=df('''SELECT COUNT(*) halves,COALESCE(SUM(CASE WHEN total_duels<60 THEN 1 ELSE 0 END),0) eligible,COALESCE(SUM(metadata_missing),0) missing FROM match_part_summary WHERE snapshot_id=?''',(sid,)).iloc[0]
@@ -133,6 +134,22 @@ def dashboard():
         else: st.warning('⚠️ Historical Extras is not initialized yet.')
     with e2:
         st.write(f"Base CURRENT snapshot: {sid}")
+    st.subheader('🔁 Recalculate Current Summary')
+    st.caption('Use this once after a logic update to recalculate the existing CURRENT snapshot. No files need to be uploaded again.')
+    if st.button('♻️ Recalculate Current Summary (Latest Logic)', key='recalculate_current_summary'):
+        try:
+            c=conn()
+            build_base_summary(c,sid)
+            c.commit()
+            n=c.execute('SELECT COUNT(*) FROM match_part_summary WHERE snapshot_id=?',(sid,)).fetchone()[0]
+            eligible=int(c.execute('SELECT COUNT(*) FROM match_part_summary WHERE snapshot_id=? AND total_duels<60',(sid,)).fetchone()[0])
+            c.close()
+            st.success(f'✅ Recalculated {n:,} Match + Part rows — Eligible <60 is now {eligible:,}.')
+            st.rerun()
+        except Exception as e:
+            try: c.close()
+            except Exception: pass
+            st.error(f'❌ Recalculation failed: {e}')
     sev=df('''SELECT severity,COUNT(*) count FROM match_part_summary WHERE snapshot_id=? AND total_duels<60 GROUP BY severity''',(sid,))
     if not sev.empty:
         sev['order']=sev.severity.map({s:i for i,s in enumerate(SEVERITY_ORDER)}); st.subheader('Review Eligibility by Severity'); st.dataframe(sev.sort_values('order').drop(columns='order'),use_container_width=True,hide_index=True)
