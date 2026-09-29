@@ -362,9 +362,9 @@ def import_distributed_parts(c, df, snapshot_id, source_name="Manual Distributio
         seen.add(key)
         rv = str(r[reviewer]).strip() if reviewer and pd.notna(r[reviewer]) and str(r[reviewer]).strip() else None
         cur = c.execute(
-            "INSERT OR IGNORE INTO review_assignments
-             (snapshot_id,reviewer_code,match_id,part_id,assigned_at,status,source)
-             VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO review_assignments "
+            "(snapshot_id,reviewer_code,match_id,part_id,assigned_at,status,source) "
+            "VALUES(?,?,?,?,?,?,?)",
             (snapshot_id, rv, m, p, now, "ASSIGNED", "MANUAL_IMPORT"),
         )
         inserted += int(cur.rowcount or 0)
