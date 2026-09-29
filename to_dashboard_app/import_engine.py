@@ -52,9 +52,13 @@ def _new_snapshot(c,name,kind,label):
     return cur.lastrowid
 
 def _flag_map(c):
-    rows=c.execute('select match_id,severity from duels_flagged').fetchall()
-    return {int(r[0]):str(r[1]).upper() if r[1] else 'UNFLAGGED' for r in rows}
-
+    rows=c.execute('select match_id,severity from duels_flagged order by source_row').fetchall()
+    out={}
+    for match_id,severity in rows:
+        sev=str(severity).upper() if severity else 'UNFLAGGED'
+        if int(match_id) not in out or SEV_RANK.get(sev,99) < SEV_RANK.get(out[int(match_id)],99):
+            out[int(match_id)] = sev
+    return out
 def import_flags(c,df):
     d=normalize_columns(df); mid=_pick(d,'match_id','arqam_id'); sev=_pick(d,'severity')
     if not mid:return 0
