@@ -54,6 +54,11 @@ def conn():
         """)
         c.execute('PRAGMA foreign_keys=ON')
     # Lightweight migrations for databases created by older V1.x builds.
+    c.execute('''CREATE TABLE IF NOT EXISTS reviewed_parts(
+        match_id INTEGER NOT NULL, part_id INTEGER NOT NULL, reviewer_name TEXT,
+        review_date TEXT, source_name TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(match_id,part_id))''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_reviewed_parts_key ON reviewed_parts(match_id,part_id)')
     cols={r[1] for r in c.execute('PRAGMA table_info(review_batch_items)').fetchall()}
     if cols and 'data_updated' not in cols:
         c.execute('ALTER TABLE review_batch_items ADD COLUMN data_updated INTEGER DEFAULT 1')
