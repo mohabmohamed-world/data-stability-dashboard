@@ -30,6 +30,29 @@ def conn():
     has_schema = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshots' LIMIT 1").fetchone()
     if not has_schema:
         c.executescript(SCHEMA.read_text(encoding='utf-8'))
+    # Migration: older cloud DBs may have snapshot_comparisons.before_snapshot_id
+    # declared NOT NULL. The first Base import has no previous snapshot, so this
+    # column must allow NULL. Rebuild the table once when the old constraint exists.
+    sc_cols=c.execute('PRAGMA table_info(snapshot_comparisons)').fetchall()
+    before_notnull = any(r[1]=='before_snapshot_id' and int(r[3])==1 for r in sc_cols)
+    if before_notnull:
+        c.execute('PRAGMA foreign_keys=OFF')
+        c.executescript("""
+            CREATE TABLE snapshot_comparisons_new(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, before_snapshot_id INTEGER,
+                current_snapshot_id INTEGER NOT NULL, match_id INTEGER NOT NULL,
+                part_id INTEGER NOT NULL, event TEXT NOT NULL, before_count REAL DEFAULT 0,
+                after_count REAL DEFAULT 0, difference REAL DEFAULT 0, pct_change REAL,
+                UNIQUE(before_snapshot_id,current_snapshot_id,match_id,part_id,event)
+            );
+            INSERT INTO snapshot_comparisons_new
+                SELECT id,before_snapshot_id,current_snapshot_id,match_id,part_id,event,
+                       before_count,after_count,difference,pct_change
+                FROM snapshot_comparisons;
+            DROP TABLE snapshot_comparisons;
+            ALTER TABLE snapshot_comparisons_new RENAME TO snapshot_comparisons;
+        """)
+        c.execute('PRAGMA foreign_keys=ON')
     # Lightweight migrations for databases created by older V1.x builds.
     cols={r[1] for r in c.execute('PRAGMA table_info(review_batch_items)').fetchall()}
     if cols and 'data_updated' not in cols:
