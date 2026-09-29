@@ -86,6 +86,7 @@ def dashboard():
             try:
                 c=conn()
                 build_base_summary(c,sid)
+                c.commit()
                 n=c.execute('SELECT COUNT(*) FROM match_part_summary WHERE snapshot_id=?',(sid,)).fetchone()[0]
                 c.close()
                 st.success(f'✅ Current summary rebuilt: {n:,} Match + Part rows.')
