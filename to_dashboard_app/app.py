@@ -99,7 +99,7 @@ def assign_next_batch(sid):
 
 def dashboard():
     st.title('📊 TO Dashboard')
-st.caption('Summary logic: v2.1 — canonical duel-name normalization')
+    st.caption('Summary logic: v2.1 — canonical duel-name normalization')
     sid=current_snapshot_id()
     if not sid: st.info('ابدأ برفع Base + Matches Info.'); return
     x=df('''SELECT COUNT(*) halves,COALESCE(SUM(CASE WHEN total_duels<60 THEN 1 ELSE 0 END),0) eligible,COALESCE(SUM(metadata_missing),0) missing FROM match_part_summary WHERE snapshot_id=?''',(sid,)).iloc[0]
