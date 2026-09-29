@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
+from gsheets_sync import test_connection, pull_all, push_rows
 from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, import_distributed_parts, latest_run, recollection_counts, recollection_funnel, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
 
 APP_DIR=Path(__file__).resolve().parent
@@ -97,6 +98,67 @@ def assign_next_batch(sid):
     finally:
         c.close()
 
+
+def google_sheets_sync_page():
+    st.title('🔗 Google Sheets Sync')
+    st.caption('Pilot: Google Sheets becomes the small-input control layer; Python remains the deterministic source of truth.')
+
+    default_url = str(st.secrets.get('GOOGLE_SYNC_URL','')).strip() if hasattr(st, 'secrets') else ''
+    default_secret = str(st.secrets.get('GOOGLE_SYNC_SECRET','')).strip() if hasattr(st, 'secrets') else ''
+    url = st.text_input('Google Apps Script Web App URL', value=default_url, type='default')
+    secret = st.text_input('Sync Secret', value=default_secret, type='password')
+
+    a,b = st.columns(2)
+    with a:
+        if st.button('🔌 Test Connection', type='primary', disabled=not (url and secret)):
+            try:
+                result = test_connection(url.strip(), secret)
+                st.success(f"Connected ✅ — {result.get('spreadsheet','Google Sheet')}")
+                st.json(result)
+            except Exception as e:
+                st.error(f'Connection failed: {e}')
+
+    with b:
+        if st.button('⬇️ Pull Small Inputs', disabled=not (url and secret)):
+            sid=current_snapshot_id()
+            if not sid:
+                st.error('Import Base first so the Current Dashboard exists.')
+            else:
+                try:
+                    data=pull_all(url.strip(), secret)
+                    c=conn()
+                    reviewed_n=import_reviewed_parts(c, pd.DataFrame(data.get('reviewed', [])), 'Google Sheets — Reviewed Matches')
+                    ops_n=import_recollection_ops(c, pd.DataFrame(data.get('ops', [])), 'Google Sheets — Ops Completed Recollection')
+                    bm_n=import_recollection_benchmark(c, pd.DataFrame(data.get('benchmark', [])), 'Google Sheets — Competition Benchmark')
+                    rec_df=pd.DataFrame(data.get('recollection', []))
+                    rec_n=0
+                    if not rec_df.empty:
+                        _,rec_n=import_recollection(c, rec_df, sid, 'Google Sheets — Recollection')
+                    c.close()
+                    st.success(f'Pulled ✅ Recollection {rec_n:,} | Ops {ops_n:,} | Reviewed {reviewed_n:,} | Benchmark {bm_n:,}')
+                    st.rerun()
+                except Exception as e:
+                    st.error(f'Pull failed: {e}')
+
+    st.divider()
+    st.subheader('⬆️ Push Current Assignments')
+    st.caption('This appends the current assignment log to the Distribution tab in Google Sheets. It is safe for a pilot; later we can add upsert/deduplication by Match ID + Part.')
+    sid=current_snapshot_id()
+    if sid and st.button('⬆️ Push Assignments to Sheet', disabled=not (url and secret)):
+        try:
+            q=df('''SELECT a.reviewer_code,a.match_id,a.part_id,a.source,a.status,a.assigned_at,
+                           s.match_name,s.competition,s.severity,s.total_duels
+                    FROM review_assignments a
+                    JOIN match_part_summary s ON s.snapshot_id=a.snapshot_id AND s.match_id=a.match_id AND s.part_id=a.part_id
+                    WHERE a.snapshot_id=?
+                    ORDER BY a.assigned_at,a.reviewer_code,a.match_id,a.part_id''',(sid,))
+            rows=q.to_dict(orient='records')
+            result=push_rows(url.strip(), secret, 'Distribution', rows)
+            st.success(f"Pushed ✅ {result.get('rows_written',0):,} rows to Distribution.")
+        except Exception as e:
+            st.error(f'Push failed: {e}')
+
+    st.info('Setup once: use the Code.gs file from the repository in Extensions → Apps Script, deploy it as a Web App, then paste the URL + secret here. You can later store them as GOOGLE_SYNC_URL and GOOGLE_SYNC_SECRET in Streamlit Secrets.')
 
 def dashboard():
     st.title('📊 TO Dashboard')
@@ -653,7 +715,7 @@ def compare_page():
                        out[display].to_csv(index=False).encode('utf-8-sig'),
                        file_name='to_dashboard_before_vs_after_detailed.csv',mime='text/csv')
 
-page=st.sidebar.radio('Navigation',['📊 Dashboard','🔎 Detailed Dashboard','📥 Import / Update','📋 Review Queue','🔄 Review Lifecycle','⚠️ Missing Metadata','🔄 Before vs After'])
+page=st.sidebar.radio('Navigation',['📊 Dashboard','🔎 Detailed Dashboard','📥 Import / Update','📋 Review Queue','🔄 Review Lifecycle','⚠️ Missing Metadata','🔄 Before vs After','🔗 Google Sheets Sync'])
 if page=='📊 Dashboard': dashboard()
 elif page=='🔎 Detailed Dashboard': detailed_dashboard_page()
 elif page=='📥 Import / Update': import_page()
@@ -661,3 +723,4 @@ elif page=='📋 Review Queue': queue_page()
 elif page=='🔄 Review Lifecycle': review_lifecycle_page()
 elif page=='⚠️ Missing Metadata': missing_page()
 elif page=='🔄 Before vs After': compare_page()
+elif page=='🔗 Google Sheets Sync': google_sheets_sync_page()
