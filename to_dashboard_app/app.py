@@ -346,6 +346,52 @@ def review_lifecycle_page():
     st.caption('الحالة: PENDING = لم تتم المراجعة، REVIEWED = تمت، RE_REVIEW_REQUIRED = كانت Reviewed لكن حصل عليها Update جديد.')
 
 
+def detailed_dashboard_page():
+    st.title('🔎 Detailed Dashboard')
+    st.caption('Match + Part view — 10 duel metrics, Total Duels, Severity, and review status.')
+    sid=current_snapshot_id()
+    if not sid:
+        st.info('Import Base first.')
+        return
+
+    st.subheader('Reviewed Matches Exclusion')
+    reviewed_up=st.file_uploader('Upload / replace Reviewed Matches',type=['csv','tsv','txt'],key='detailed_reviewed_upload')
+    if reviewed_up and st.button('📥 Load Reviewed Matches',key='detailed_load_reviewed'):
+        try:
+            c=conn(); n=import_reviewed_parts(c,read_table_bytes(reviewed_up.getvalue(),reviewed_up.name),reviewed_up.name); c.close()
+            st.success(f'✅ Loaded {n:,} reviewed Match + Part keys. They are excluded from distribution.')
+            st.rerun()
+        except Exception as e:
+            st.error(f'❌ Could not load Reviewed Matches: {e}')
+    st.info(f'Current exclusion list: {reviewed_parts_count():,} reviewed halves.')
+
+    q=df('''SELECT s.match_id,s.part_id,s.match_name,s.competition,s.collection_completion,
+                   s.dribble,s.fifty_fifty,s.hold_up_duel,s.leg_stretch_duel,
+                   s.positioning_duel,s.separation_duel,s.shield,s.tackle,
+                   s.aerial_won,s.step_in,s.total_duels,s.severity,
+                   CASE WHEN rp.match_id IS NULL THEN 'NO' ELSE 'YES' END AS reviewed_already
+            FROM match_part_summary s
+            LEFT JOIN reviewed_parts rp ON rp.match_id=s.match_id AND rp.part_id=s.part_id
+            WHERE s.snapshot_id=?''',(sid,))
+    a,b,c1,d=st.columns(4)
+    comps=sorted([str(x) for x in q['competition'].dropna().unique().tolist() if str(x).strip()])
+    comp=a.multiselect('Competition',comps)
+    sev=b.multiselect('Severity',SEVERITY_ORDER,default=SEVERITY_ORDER)
+    review_filter=c1.selectbox('Reviewed status',['All','Not Reviewed','Reviewed'])
+    max_duels=d.number_input('Max Total Duels',1,1000,1000)
+    if comp: q=q[q['competition'].isin(comp)]
+    if sev: q=q[q['severity'].isin(sev)]
+    q=q[q['total_duels']<=max_duels]
+    if review_filter=='Not Reviewed': q=q[q['reviewed_already']=='NO']
+    elif review_filter=='Reviewed': q=q[q['reviewed_already']=='YES']
+    display_cols=['match_id','part_id','match_name','competition','collection_completion',
+                  'dribble','fifty_fifty','hold_up_duel','leg_stretch_duel','positioning_duel',
+                  'separation_duel','shield','tackle','aerial_won','step_in','total_duels',
+                  'severity','reviewed_already']
+    st.write(f'{len(q):,} rows')
+    st.dataframe(q[display_cols],use_container_width=True,hide_index=True)
+    st.download_button('📥 Export Detailed View',q[display_cols].to_csv(index=False).encode('utf-8-sig'),
+                       file_name='to_dashboard_detailed_view.csv',mime='text/csv')
 def missing_page():
     st.title('⚠️ Missing Match Metadata'); sid=current_snapshot_id()
     if not sid: st.info('Import Base first.'); return
@@ -377,8 +423,9 @@ def compare_page():
             q=df('''SELECT ex_match_id,ex_part_id,tornado_extra,before_counter,after_counter,difference,before_collection_date,after_collection_date FROM extras_daily_changes WHERE snapshot_id=? ORDER BY ex_match_id,ex_part_id,tornado_extra''',(dsid,))
             st.metric('Changed Extras rows',f"{int((q.difference!=0).sum()):,}"); st.dataframe(q,use_container_width=True,hide_index=True)
 
-page=st.sidebar.radio('Navigation',['📊 Dashboard','📥 Import / Update','📋 Review Queue','🔄 Review Lifecycle','⚠️ Missing Metadata','🔄 Before vs After'])
+page=st.sidebar.radio('Navigation',['📊 Dashboard','🔎 Detailed Dashboard','📥 Import / Update','📋 Review Queue','🔄 Review Lifecycle','⚠️ Missing Metadata','🔄 Before vs After'])
 if page=='📊 Dashboard': dashboard()
+elif page=='🔎 Detailed Dashboard': detailed_dashboard_page()
 elif page=='📥 Import / Update': import_page()
 elif page=='📋 Review Queue': queue_page()
 elif page=='🔄 Review Lifecycle': review_lifecycle_page()
