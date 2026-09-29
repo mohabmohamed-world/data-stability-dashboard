@@ -82,6 +82,39 @@ def dashboard():
 
 def import_page():
     st.title('📥 Import / Update')
+
+    st.subheader('☁️ Cloud Database — Restore Current Snapshot')
+    st.caption('Streamlit Cloud starts with an empty temporary filesystem. Use the compact DB backup once to load the current working data into this session.')
+    backup = st.file_uploader('Upload current compact DB backup (.db or .sqlite)', type=['db','sqlite','sqlite3'], key='cloud_db_restore')
+    if backup and st.button('📦 Restore Database Backup', type='primary', key='restore_db'):
+        import tempfile, os, sqlite3, shutil
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as tmp:
+                tmp.write(backup.getvalue())
+                tmp_path=tmp.name
+            vc=sqlite3.connect(tmp_path)
+            required=['snapshots','match_part_summary','extras_current','matches_info','reviewers']
+            missing=[t for t in required if vc.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(t,)).fetchone() is None]
+            current_count=vc.execute("SELECT COUNT(*) FROM match_part_summary").fetchone()[0] if not missing else 0
+            vc.close()
+            if missing:
+                raise ValueError(f'Backup is missing required tables: {missing}')
+            if current_count == 0:
+                raise ValueError('Backup contains no Match + Part summary data.')
+            DB.parent.mkdir(parents=True, exist_ok=True)
+            if DB.exists():
+                shutil.copy2(DB, str(DB)+'.before_restore')
+            os.replace(tmp_path, DB)
+            st.success(f'✅ Database restored successfully — {current_count:,} Match + Part rows loaded.')
+            st.rerun()
+        except Exception as e:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+            st.error(f'Could not restore database: {e}')
+
+    st.divider()
     st.info('Workflow: 1) seed the historical Extras once, 2) upload the full Base export (Before + After in one file), 3) upload only today\'s Extras file for each daily update.')
 
     st.subheader('0) Initial Setup — Historical Extras (once)')
