@@ -81,7 +81,19 @@ def dashboard():
     x=df('''SELECT COUNT(*) halves,COALESCE(SUM(CASE WHEN total_duels<60 THEN 1 ELSE 0 END),0) eligible,COALESCE(SUM(metadata_missing),0) missing FROM match_part_summary WHERE snapshot_id=?''',(sid,)).iloc[0]
     halves=int(x['halves'] or 0); eligible=int(x['eligible'] or 0); missing=int(x['missing'] or 0)
     if halves == 0:
-        st.warning('⚠️ يوجد CURRENT snapshot لكن لم يتم بناء Match + Part Summary بعد. راجع Latest Imports لمعرفة نتيجة آخر Run.')
+        st.warning('⚠️ يوجد CURRENT snapshot لكن لم يتم بناء Match + Part Summary بعد.')
+        if st.button('🔧 Rebuild Current Match + Part Summary', key='dashboard_rebuild_current_summary'):
+            try:
+                c=conn()
+                build_base_summary(c,sid)
+                n=c.execute('SELECT COUNT(*) FROM match_part_summary WHERE snapshot_id=?',(sid,)).fetchone()[0]
+                c.close()
+                st.success(f'✅ Current summary rebuilt: {n:,} Match + Part rows.')
+                st.rerun()
+            except Exception as e:
+                try: c.close()
+                except Exception: pass
+                st.error(f'❌ Summary rebuild failed: {e}')
         latest=df('SELECT import_type,source_name,status,rows_read,rows_inserted,warnings_count,started_at,completed_at,error_message FROM imports ORDER BY id DESC LIMIT 10')
         st.subheader('Latest Imports')
         st.dataframe(latest,use_container_width=True,hide_index=True)
