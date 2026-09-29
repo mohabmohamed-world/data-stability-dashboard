@@ -25,8 +25,8 @@ def conn():
     c=sqlite3.connect(DB, timeout=60)
     c.row_factory=sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON')
-    c.execute('PRAGMA journal_mode=DELETE')
-    c.execute('PRAGMA synchronous=FULL')
+    # Do not change journal mode on every Streamlit rerun; this can lock the Cloud DB.
+    c.execute('PRAGMA synchronous=NORMAL')
     has_schema = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshots' LIMIT 1").fetchone()
     if not has_schema:
         c.executescript(SCHEMA.read_text(encoding='utf-8'))
