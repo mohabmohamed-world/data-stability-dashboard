@@ -512,7 +512,7 @@ def compare_page():
     comp=a.multiselect('Competition',comp_opts,key='compare_comp')
     only_changed=b.checkbox('Show changed only',value=False,key='compare_changed')
     min_abs=c1.number_input('Min |Δ Total Duels|',0,1000,0,key='compare_min_delta')
-    max_rows=d.number_input('Rows',50,5000,500,key='compare_rows')
+    max_rows=d.number_input('Rows',50,50000,22200,key='compare_rows',help='22,200 = show all current Match + Part rows when no other filters are applied.')
 
     if comp: out=out[out['competition'].isin(comp)]
     if only_changed: out=out[out['Changed?']]
