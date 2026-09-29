@@ -143,7 +143,7 @@ def import_base_full(c,df,matches_df=None,flags_df=None,reviewers_df=None):
         c.execute('insert or replace into snapshot_comparisons(before_snapshot_id,current_snapshot_id,match_id,part_id,event,before_count,after_count,difference,pct_change) values(?,?,?,?,?,?,?,?,?)',(None,sid,int(float(m)),int(float(p)),str(e),bb,aa,diff,pct))
     _summary(c,sid)
     miss=c.execute('select count(*) from match_part_summary where snapshot_id=? and metadata_missing=1',(sid,)).fetchone()[0]
-    c.execute('insert into imports(import_type,source_name,snapshot_id,status,rows_read,rows_inserted,completed_at) values(?,?,?,?,?,?,CURRENT_TIMESTAMP)',('BASE_FULL','Base',sid,'SUCCESS',len(d),len(d),datetime.now().isoformat(timespec='seconds')))
+    c.execute('insert into imports(import_type,source_name,snapshot_id,status,rows_read,rows_inserted) values(?,?,?,?,?,?)',('BASE_FULL','Base',sid,'SUCCESS',len(d),len(d)))
     c.commit()
     return sid,{'base_rows':len(d),'match_parts':int(c.execute('select count(*) from match_part_summary where snapshot_id=?',(sid,)).fetchone()[0]),'missing_metadata':int(miss)}
 
