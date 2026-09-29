@@ -338,7 +338,7 @@ def queue_page():
         st.info(f"Current Recollection: **{run['source_name']}** — {int(run['rows_loaded']):,} unique Match + Part rows loaded.")
         m1,m2,m3,m4,m5=st.columns(5)
         m1.metric('Recollection',f"{rc['total']:,}")
-        m2.metric('Positive Change',f"{rc['positive_changed']:,}")
+        m2.metric('Positive Change — All',f"{rc['positive_changed']:,}")
         m3.metric('Ops Excluded',f"{rc['ops_excluded']:,}")
         m4.metric('Reviewed Excluded',f"{rc['reviewed_excluded']:,}")
         m5.metric('Review Candidates',f"{rc['eligible']:,}")
