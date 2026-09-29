@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
-from gsheets_sync import test_connection, pull_all, push_rows
+from gsheets_sync import test_connection, pull_all, pull_sheet, push_rows
 from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, import_distributed_parts, latest_run, recollection_counts, recollection_funnel, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
 
 APP_DIR=Path(__file__).resolve().parent
@@ -158,7 +158,8 @@ def google_sheets_sync_page():
         except Exception as e:
             st.error(f'Push failed: {e}')
 
-    st.info('Setup once: use the Code.gs file from the repository in Extensions → Apps Script, deploy it as a Web App, then paste the URL + secret here. You can later store them as GOOGLE_SYNC_URL and GOOGLE_SYNC_SECRET in Streamlit Secrets.')
+    st.info('One-time setup: bind Code.gs to the Google Sheet you already use, deploy it as a Web App, then add GOOGLE_SYNC_URL and GOOGLE_SYNC_SECRET to Streamlit Secrets. The Dashboard will then read the existing Reviewed Matches tab automatically; no large Reviewed Matches upload is needed.')
+    st.caption('The live sync targets your existing sheet tabs. No replacement or new spreadsheet is required.')
 
 def dashboard():
     st.title('📊 TO Dashboard')
@@ -343,12 +344,58 @@ def import_page():
     st.divider(); st.subheader('Latest Imports'); st.dataframe(df('SELECT * FROM imports ORDER BY id DESC LIMIT 20'),use_container_width=True,hide_index=True)
 
 
+
+def _streamlit_secret(name, default=''):
+    try:
+        return str(st.secrets.get(name, default)).strip()
+    except Exception:
+        return default
+
+
+@st.fragment(run_every="2m")
+def live_reviewed_matches_sync(sid):
+    url=_streamlit_secret('GOOGLE_SYNC_URL')
+    secret=_streamlit_secret('GOOGLE_SYNC_SECRET')
+    if not url or not secret:
+        st.caption('🟡 Live Google Sheets sync is not configured yet.')
+        return
+
+    try:
+        payload=pull_sheet(url, secret, 'Reviewed Matches')
+        rows=payload.get('rows', [])
+        fingerprint=pd.util.hash_pandas_object(
+            pd.DataFrame(rows).fillna('').astype(str),
+            index=True
+        ).astype('uint64').sum() if rows else 0
+        old=st.session_state.get('reviewed_sheet_fingerprint')
+        if old is None:
+            st.session_state['reviewed_sheet_fingerprint']=int(fingerprint)
+            c=conn()
+            n=import_reviewed_parts(c,pd.DataFrame(rows),'Google Sheets — Reviewed Matches (Live)')
+            c.close()
+            st.session_state['reviewed_sheet_count']=n
+            st.rerun()
+        elif int(old) != int(fingerprint):
+            st.session_state['reviewed_sheet_fingerprint']=int(fingerprint)
+            c=conn()
+            n=import_reviewed_parts(c,pd.DataFrame(rows),'Google Sheets — Reviewed Matches (Live)')
+            c.close()
+            st.session_state['reviewed_sheet_count']=n
+            st.rerun()
+        count=st.session_state.get('reviewed_sheet_count', len(rows))
+        st.caption(f'🟢 Live Reviewed Matches sync — {count:,} keys | checked every 2 min')
+    except Exception as e:
+        st.warning(f'🟠 Live Reviewed Matches sync unavailable: {e}')
+
+
 def queue_page():
     st.title('📋 Review Queue')
     sid=current_snapshot_id()
     if not sid:
         st.info('Import Base first.')
         return
+
+    live_reviewed_matches_sync(sid)
 
     # Recollection input + decision layer.
     st.subheader('🔁 Recollection Review')
