@@ -235,6 +235,28 @@ def patch_metadata_df(c,df,sid):
     c.commit()
     return updated
 
+def import_reviewed_parts(c,df,source_name='Reviewed Matches'):
+    d=normalize_columns(df)
+    mid=_pick(d,'match_id','event_match_id')
+    pid=_pick(d,'part_id','event_part_id','part')
+    if not (mid and pid):
+        raise ValueError('Reviewed Matches file needs Match ID and Part ID columns')
+    reviewer=_pick(d,'reviewer_name','reviewer','reviewer_name')
+    review_date=_pick(d,'review_date','date')
+    c.execute('DELETE FROM reviewed_parts')
+    seen=set()
+    for _,r in d.iterrows():
+        if pd.isna(r[mid]) or pd.isna(r[pid]): continue
+        key=(int(float(r[mid])),int(float(r[pid])))
+        if key in seen: continue
+        seen.add(key)
+        rv=str(r[reviewer]) if reviewer and pd.notna(r[reviewer]) else None
+        rd=str(r[review_date]) if review_date and pd.notna(r[review_date]) else None
+        c.execute('INSERT OR REPLACE INTO reviewed_parts(match_id,part_id,reviewer_name,review_date,source_name) VALUES(?,?,?,?,?)',
+                  (key[0],key[1],rv,rd,source_name))
+    c.commit()
+    return len(seen)
+
 def create_review_batch(c,df,name,source_name='Review list'):
     d=normalize_columns(df); m=_pick(d,'match_id','event_match_id'); p=_pick(d,'part_id','event_part_id')
     if not (m and p): raise ValueError('Review list needs Match ID and Part ID columns')
