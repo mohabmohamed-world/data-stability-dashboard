@@ -42,3 +42,7 @@ def push_rows(base_url: str, secret: str, sheet: str, rows: list[dict[str, Any]]
         'sheet': sheet,
         'rows': rows,
     })
+
+
+def pull_sheet(base_url: str, secret: str, sheet: str) -> dict[str, Any]:
+    return _request(_url(base_url, "read", secret, sheet))
