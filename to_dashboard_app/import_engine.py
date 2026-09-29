@@ -189,7 +189,47 @@ def import_extras_daily_file(c,df):
 
 def build_base_summary(c,sid): _summary(c,sid)
 
-def patch_metadata_df(c,df,sid): return 0
+def patch_metadata_df(c,df,sid):
+    d=normalize_columns(df)
+    mid=_pick(d,'match_id','event_match_id')
+    if not mid:
+        raise ValueError('Metadata patch needs a match_id column')
+    name=_pick(d,'match_name','match_name')
+    comp=_pick(d,'competition')
+    completion=_pick(d,'collection_completion','collection_completion_24h')
+    sbd=_pick(d,'sbd_id')
+    updated=0
+    for _,r in d.iterrows():
+        if pd.isna(r[mid]): continue
+        m=int(float(r[mid]))
+        def gv(col):
+            return r[col] if col and pd.notna(r[col]) else None
+        existing=c.execute('select 1 from matches_info where snapshot_id=? and match_id=?',(sid,m)).fetchone()
+        values=(gv(sbd),gv(name),gv(comp),gv(completion))
+        if existing:
+            c.execute('''update matches_info
+                         set sbd_id=coalesce(?,sbd_id),
+                             match_name=coalesce(?,match_name),
+                             competition=coalesce(?,competition),
+                             collection_completion=coalesce(?,collection_completion)
+                         where snapshot_id=? and match_id=?''',
+                      (*values,sid,m))
+        else:
+            c.execute('''insert into matches_info(snapshot_id,match_id,sbd_id,match_name,competition,collection_completion)
+                         values(?,?,?,?,?,?)''',(sid,m,*values[0:1],values[1],values[2],values[3]))
+        updated += 1
+    # Refresh metadata fields for all summary rows in this snapshot.
+    c.execute('''update match_part_summary
+                 set match_name=(select mi.match_name from matches_info mi where mi.snapshot_id=? and mi.match_id=match_part_summary.match_id),
+                     competition=(select mi.competition from matches_info mi where mi.snapshot_id=? and mi.match_id=match_part_summary.match_id),
+                     collection_completion=(select mi.collection_completion from matches_info mi where mi.snapshot_id=? and mi.match_id=match_part_summary.match_id),
+                     metadata_missing=case when exists(select 1 from matches_info mi where mi.snapshot_id=? and mi.match_id=match_part_summary.match_id) then 0 else 1 end
+                 where snapshot_id=?''',(sid,sid,sid,sid,sid))
+    c.execute('''update missing_metadata
+                 set resolved=1,resolution_source='metadata_patch'
+                 where snapshot_id=? and match_id in (select match_id from matches_info where snapshot_id=?)''',(sid,sid))
+    c.commit()
+    return updated
 
 def create_review_batch(c,df,name,source_name='Review list'):
     d=normalize_columns(df); m=_pick(d,'match_id','event_match_id'); p=_pick(d,'part_id','event_part_id')
