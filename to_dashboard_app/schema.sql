@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS competition_benchmarks(
 );
 
 CREATE INDEX IF NOT EXISTS idx_lifecycle_half ON lifecycle_records(match_id,part_id);
-CREATE INDEX IF NOT EXISTS idx_lifecycle_source ON lifecycle_records(workflow_source,competition_key) WHERE 0;
+CREATE INDEX IF NOT EXISTS idx_lifecycle_source ON lifecycle_records(workflow_source,source_name);
 CREATE INDEX IF NOT EXISTS idx_lifecycle_competition ON lifecycle_records(workflow_source,competition,part_id);
 CREATE INDEX IF NOT EXISTS idx_lifecycle_fingerprint ON lifecycle_records(fingerprint);
 
