@@ -180,7 +180,10 @@ def run_audit_reconciliation():
         return {'completed_audits':0,'created':0,'updated':0,'awaiting':0,'changed':0,'no_net_change':0}
     c=conn()
     try:
-        return reconcile_recollection_audits(c,sid)
+        result=reconcile_recollection_audits(c,sid)
+        # Rebuild audit-based benchmarks after a confirmed audit value is written.
+        rebuild_competition_benchmarks(c)
+        return result
     finally:
         c.close()
 
@@ -303,14 +306,23 @@ def lifecycle_page():
     st.divider()
     c=conn()
     history=pd.read_sql_query(
-        """SELECT workflow_source,cycle_key,match_id,part_id,match_name,competition,collector,owner,
-                  reviewer_code,reviewer_name,audit_reviewer,before_total,after_total,audit_total,
-                  ROUND(after_total-before_total,2) qc_or_recollection_change,
-                  ROUND(audit_total-after_total,2) audit_change,
-                  ROUND(audit_total-before_total,2) total_recovery,
-                  collection_date,review_date,audit_date,source_name
-           FROM lifecycle_records
-           ORDER BY COALESCE(audit_date,review_date,collection_date) DESC,id DESC""",
+        """SELECT lr.workflow_source,lr.cycle_key,lr.match_id,lr.part_id,lr.match_name,lr.competition,lr.collector,lr.owner,
+                  lr.reviewer_code,lr.reviewer_name,lr.audit_reviewer,lr.before_total,lr.after_total,lr.audit_total,
+                  ROUND(lr.after_total-lr.before_total,2) qc_or_recollection_change,
+                  ROUND(lr.audit_total-lr.after_total,2) audit_change,
+                  ROUND(lr.audit_total-lr.before_total,2) total_recovery,
+                  lr.collection_date,lr.review_date,lr.audit_date,lr.source_name,
+                  CASE
+                    WHEN lr.workflow_source='RECOLLECTION' THEN
+                      COALESCE(ar.status,
+                               CASE WHEN lr.audit_total IS NOT NULL THEN 'AUDITED — RECORDED'
+                                    ELSE 'AUDIT NOT YET CONFIRMED' END)
+                    WHEN lr.audit_total IS NOT NULL THEN 'AUDITED — RECORDED'
+                    ELSE 'AUDIT NOT YET CONFIRMED'
+                  END AS audit_status
+           FROM lifecycle_records lr
+           LEFT JOIN audit_reconciliation ar ON ar.lifecycle_id=lr.id
+           ORDER BY COALESCE(lr.audit_date,lr.review_date,lr.collection_date) DESC,lr.id DESC""",
         c
     )
     c.close()
@@ -329,10 +341,13 @@ def lifecycle_page():
         f5,f6,f7,f8=st.columns(4)
         collectors=sorted([str(x) for x in history['collector'].dropna().unique() if str(x).strip()])
         owners=sorted([str(x) for x in history['owner'].dropna().unique() if str(x).strip()])
+        audit_statuses=sorted([str(x) for x in history['audit_status'].dropna().unique() if str(x).strip()])
         collector=f5.multiselect('Collector',collectors)
         owner=f6.multiselect('Owner / Responsible',owners)
         min_change=f7.number_input('Min Absolute Change',0,1000,0)
         show_large=f8.checkbox('Show Large Changes Only',value=False)
+
+        audit_filter=st.multiselect('Audit Status',audit_statuses,default=audit_statuses,key='lifecycle_audit_status')
 
         if src:
             history=history[history['workflow_source'].isin(src)]
@@ -344,6 +359,8 @@ def lifecycle_page():
             history=history[history['collector'].isin(collector)]
         if owner:
             history=history[history['owner'].isin(owner)]
+        if audit_filter:
+            history=history[history['audit_status'].isin(audit_filter)]
 
         if stage=='Before → After':
             history['selected_change']=history['qc_or_recollection_change']
