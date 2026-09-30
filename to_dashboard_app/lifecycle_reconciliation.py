@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 import pandas as pd
 from datetime import datetime
@@ -50,22 +51,81 @@ def _current_total(c, snapshot_id, match_id, part_id):
     return float(row[0]) if row and row[0] is not None else None
 
 
+def _snapshot_created_at(c, snapshot_id):
+    if snapshot_id is None:
+        return None
+    row = c.execute(
+        "SELECT created_at FROM snapshots WHERE id=?",
+        (int(snapshot_id),),
+    ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
+def _parse_dt(value):
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return pd.to_datetime(text, errors="raise").to_pydatetime().replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _has_explicit_time(value):
+    if value is None:
+        return False
+    return bool(re.search(r"\d{1,2}:\d{2}", str(value).strip()))
+
+
+def _snapshot_is_after_audit(c, snapshot_id, audit_value):
+    """
+    Prove that the Dashboard snapshot was created after the audit.
+
+    Date-only audit values use a conservative rule:
+      snapshot_date > audit_date
+
+    Audit values with an explicit time use:
+      snapshot_timestamp > audit_timestamp
+
+    This prevents a same-day audit from being marked CHANGED merely because
+    the Dashboard was refreshed on the same calendar date.
+    """
+    snapshot_dt = _parse_dt(_snapshot_created_at(c, snapshot_id))
+    audit_dt = _parse_dt(audit_value)
+    if snapshot_dt is None or audit_dt is None:
+        return False
+    if _has_explicit_time(audit_value):
+        return snapshot_dt > audit_dt
+    return snapshot_dt.date() > audit_dt.date()
+
+
+def _observation_note(c, snapshot_id, audit_value):
+    snapshot_at = _snapshot_created_at(c, snapshot_id)
+    if snapshot_at and audit_value:
+        if _snapshot_is_after_audit(c, snapshot_id, audit_value):
+            return f"Confirmed against Dashboard snapshot {snapshot_id} ({snapshot_at}) after audit ({audit_value})."
+        return f"Dashboard snapshot {snapshot_id} ({snapshot_at}) is not proven to be after audit ({audit_value}); kept awaiting."
+    return "Dashboard observation timing could not be proven; kept awaiting."
+
+
 def reconcile_recollection_audits(c, snapshot_id):
     """
     Reconcile completed Recollection audits against the latest Dashboard snapshot.
 
-    Important timing rule:
-    - Audit completion is an event.
-    - Dashboard Current is a delayed observation.
-    - First observation equal to Recollection After => AWAITING_DASHBOARD_UPDATE.
-    - A later snapshot with a different total => AUDITED — CHANGED.
-    - A later snapshot with the same total => AUDITED — NO NET CHANGE.
+    State flow:
+      Audit complete
+        -> wait for a Dashboard snapshot proven to be AFTER the audit
+        -> same total as Recollection After => NO NET CHANGE
+        -> different total => CHANGED
 
-    We intentionally do not delete/ignore the awaiting rows.
+    Existing rows created by the older non-time-aware logic are repaired:
+    a CHANGED/NO CHANGE row is returned to AWAITING when its stored observation
+    snapshot cannot be proven to be after the audit.
     """
     ensure_reconciliation_table(c)
 
-    # Only a Reviewed Matches row explicitly marked Complete/Yes is an audit-complete signal.
     completed = pd.read_sql_query(
         """SELECT lr.id AS lifecycle_id,
                   lr.workflow_source,
@@ -93,15 +153,16 @@ def reconcile_recollection_audits(c, snapshot_id):
         m = int(r.match_id)
         p = int(r.part_id)
         expected = float(r.after_total)
+        audit_value = r.resolved_audit_date
         current = _current_total(c, snapshot_id, m, p)
+        current_is_post_audit = _snapshot_is_after_audit(c, snapshot_id, audit_value)
 
-        # Backfill audit metadata from Reviewed Matches into the lifecycle gold row.
         c.execute(
             """UPDATE lifecycle_records
                SET audit_date=COALESCE(NULLIF(TRIM(audit_date),''),?),
                    audit_reviewer=COALESCE(NULLIF(TRIM(audit_reviewer),''),?)
                WHERE id=?""",
-            (r.resolved_audit_date, r.resolved_audit_reviewer, lid)
+            (audit_value, r.resolved_audit_reviewer, lid)
         )
 
         existing = c.execute(
@@ -111,13 +172,26 @@ def reconcile_recollection_audits(c, snapshot_id):
 
         if existing is None:
             status = STATUS_AWAITING
+            first_snapshot = None
+            last_snapshot = None
+            observed_total = None
             changed_total = None
             audit_total_value = None
-            if current is not None and current != expected:
-                status = STATUS_CHANGED
-                changed_total = current
-                audit_total_value = current
-                changed += 1
+
+            if current_is_post_audit and current is not None:
+                first_snapshot = snapshot_id
+                last_snapshot = snapshot_id
+                observed_total = current
+                if current != expected:
+                    status = STATUS_CHANGED
+                    changed_total = current
+                    audit_total_value = current
+                    changed += 1
+                else:
+                    status = STATUS_NO_CHANGE
+                    changed_total = expected
+                    audit_total_value = expected
+                    no_change += 1
             else:
                 awaiting += 1
 
@@ -128,70 +202,106 @@ def reconcile_recollection_audits(c, snapshot_id):
                     last_observed_total,status,changed_total,last_checked_at,note)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    lid, r.workflow_source, m, p, r.resolved_audit_date, expected,
-                    snapshot_id, snapshot_id, current, status, changed_total, now,
-                    "Initial observation after audit completion.",
+                    lid, r.workflow_source, m, p, audit_value, expected,
+                    first_snapshot, last_snapshot, observed_total, status,
+                    changed_total, now, _observation_note(c, snapshot_id, audit_value),
                 ),
             )
-            if audit_total_value is not None:
-                c.execute(
-                    "UPDATE lifecycle_records SET audit_total=? WHERE id=?",
-                    (float(audit_total_value), lid),
-                )
+            c.execute(
+                "UPDATE lifecycle_records SET audit_total=? WHERE id=?",
+                (float(audit_total_value), lid) if audit_total_value is not None else (None, lid),
+            )
             created += 1
             continue
 
         old_status = str(existing["status"])
         first_snapshot = existing["first_observation_snapshot_id"]
-        status = old_status
+        first_is_valid = _snapshot_is_after_audit(c, first_snapshot, audit_value) if first_snapshot else False
 
-        # Backfill the resolved audit metadata if this reconciliation row was
-        # created before Complete/Review Date metadata became available.
-        c.execute(
-            """UPDATE audit_reconciliation
-               SET audit_completed_at=COALESCE(NULLIF(audit_completed_at,''),?)
-               WHERE lifecycle_id=?""",
-            (r.resolved_audit_date, lid)
-        )
-        changed_total = existing["changed_total"]
+        # Repair rows produced by the old logic.
+        if old_status in (STATUS_CHANGED, STATUS_NO_CHANGE) and not first_is_valid:
+            old_status = STATUS_AWAITING
+            first_snapshot = None
+            changed_total = None
+            last_snapshot = None
+            last_observed_total = None
+            c.execute(
+                """UPDATE audit_reconciliation
+                   SET first_observation_snapshot_id=NULL,
+                       last_observation_snapshot_id=NULL,
+                       last_observed_total=NULL,
+                       status=?,
+                       changed_total=NULL,
+                       last_checked_at=?,
+                       note=?
+                   WHERE lifecycle_id=?""",
+                (
+                    STATUS_AWAITING, now,
+                    "Repaired by time-aware reconciliation: prior observation was not proven to be after audit.",
+                    lid,
+                ),
+            )
+            c.execute("UPDATE lifecycle_records SET audit_total=NULL WHERE id=?", (lid,))
+        else:
+            changed_total = existing["changed_total"]
+            last_snapshot = existing["last_observation_snapshot_id"]
+            last_observed_total = existing["last_observed_total"]
+
+        status = old_status
         audit_total_value = None
 
-        if old_status == STATUS_AWAITING:
-            if current is not None and current != expected:
-                status = STATUS_CHANGED
-                changed_total = current
-                audit_total_value = current
-                changed += 1
-            elif first_snapshot is not None and int(snapshot_id) > int(first_snapshot):
-                # This is the delayed-dashboard confirmation: a later snapshot
-                # still equals the Recollection After value, so there is no net change.
-                status = STATUS_NO_CHANGE
-                changed_total = expected
-                audit_total_value = expected
-                no_change += 1
+        if status == STATUS_AWAITING:
+            if current_is_post_audit and current is not None:
+                first_snapshot = first_snapshot or snapshot_id
+                last_snapshot = snapshot_id
+                last_observed_total = current
+                if current != expected:
+                    status = STATUS_CHANGED
+                    changed_total = current
+                    audit_total_value = current
+                    changed += 1
+                else:
+                    status = STATUS_NO_CHANGE
+                    changed_total = expected
+                    audit_total_value = expected
+                    no_change += 1
             else:
                 awaiting += 1
-        elif old_status == STATUS_CHANGED:
-            changed_total = changed_total if changed_total is not None else current
-            audit_total_value = changed_total
-        elif old_status == STATUS_NO_CHANGE:
-            # Keep historical NO CHANGE unless a later snapshot actually changes.
-            audit_total_value = expected
-            if current is not None and current != expected:
-                status = STATUS_CHANGED
-                changed_total = current
-                audit_total_value = current
-                changed += 1
 
-        if audit_total_value is not None:
-            c.execute(
-                "UPDATE lifecycle_records SET audit_total=? WHERE id=?",
-                (float(audit_total_value), lid),
-            )
+        elif status == STATUS_CHANGED:
+            # Once a true post-audit change has been observed, retain CHANGED.
+            if current_is_post_audit:
+                last_snapshot = snapshot_id
+                last_observed_total = current
+                if changed_total is None and current is not None:
+                    changed_total = current
+            audit_total_value = changed_total
+
+        elif status == STATUS_NO_CHANGE:
+            # A later, proven post-audit snapshot that differs from the expected
+            # Recollection After value upgrades the row to CHANGED.
+            if current_is_post_audit and current is not None:
+                last_snapshot = snapshot_id
+                last_observed_total = current
+                if current != expected:
+                    status = STATUS_CHANGED
+                    changed_total = current
+                    audit_total_value = current
+                    changed += 1
+                else:
+                    audit_total_value = expected
+            else:
+                audit_total_value = expected
+
+        c.execute(
+            "UPDATE lifecycle_records SET audit_total=? WHERE id=?",
+            (float(audit_total_value), lid) if audit_total_value is not None else (None, lid),
+        )
 
         c.execute(
             """UPDATE audit_reconciliation
-               SET last_observation_snapshot_id=?,
+               SET first_observation_snapshot_id=?,
+                   last_observation_snapshot_id=?,
                    last_observed_total=?,
                    status=?,
                    changed_total=?,
@@ -199,8 +309,8 @@ def reconcile_recollection_audits(c, snapshot_id):
                    note=?
                WHERE lifecycle_id=?""",
             (
-                snapshot_id, current, status, changed_total, now,
-                "Reconciled against Dashboard Current snapshot.",
+                first_snapshot, last_snapshot, last_observed_total,
+                status, changed_total, now, _observation_note(c, snapshot_id, audit_value),
                 lid,
             ),
         )
