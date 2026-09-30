@@ -243,6 +243,8 @@ def import_reviewed_parts(c,df,source_name='Reviewed Matches'):
         raise ValueError('Reviewed Matches file needs Match ID and Part ID columns')
     reviewer=_pick(d,'reviewer_name','reviewer','reviewer_name')
     review_date=_pick(d,'review_date','date')
+    complete=_pick(d,'complete_flag','complete','completed','status')
+    audit_reviewer=_pick(d,'audit_reviewer','auditor','audit_owner','auditor_name')
     c.execute('DELETE FROM reviewed_parts')
     seen=set()
     for _,r in d.iterrows():
@@ -252,8 +254,12 @@ def import_reviewed_parts(c,df,source_name='Reviewed Matches'):
         seen.add(key)
         rv=str(r[reviewer]) if reviewer and pd.notna(r[reviewer]) else None
         rd=str(r[review_date]) if review_date and pd.notna(r[review_date]) else None
-        c.execute('INSERT OR REPLACE INTO reviewed_parts(match_id,part_id,reviewer_name,review_date,source_name) VALUES(?,?,?,?,?)',
-                  (key[0],key[1],rv,rd,source_name))
+        cf=str(r[complete]).strip() if complete and pd.notna(r[complete]) else None
+        ar=str(r[audit_reviewer]).strip() if audit_reviewer and pd.notna(r[audit_reviewer]) else None
+        c.execute('''INSERT OR REPLACE INTO reviewed_parts(
+                        match_id,part_id,reviewer_name,review_date,source_name,complete_flag,audit_reviewer)
+                     VALUES(?,?,?,?,?,?,?)''',
+                  (key[0],key[1],rv,rd,source_name,cf,ar))
     c.commit()
     return len(seen)
 
