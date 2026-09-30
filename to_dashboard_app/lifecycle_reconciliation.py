@@ -26,6 +26,16 @@ def ensure_reconciliation_table(c):
         last_checked_at TEXT DEFAULT CURRENT_TIMESTAMP,
         note TEXT
     )""")
+    recon_cols={row[1] for row in c.execute('PRAGMA table_info(audit_reconciliation)').fetchall()}
+    for _col,_ddl in [
+        ('workflow_source','TEXT'),('match_id','INTEGER'),('part_id','INTEGER'),
+        ('audit_completed_at','TEXT'),('expected_after_total','REAL'),
+        ('first_observation_snapshot_id','INTEGER'),('last_observation_snapshot_id','INTEGER'),
+        ('last_observed_total','REAL'),('status','TEXT'),('changed_total','REAL'),
+        ('last_checked_at','TEXT'),('note','TEXT')
+    ]:
+        if _col not in recon_cols:
+            c.execute(f'ALTER TABLE audit_reconciliation ADD COLUMN {_col} {_ddl}')
     c.execute("CREATE INDEX IF NOT EXISTS idx_audit_recon_status ON audit_reconciliation(status)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_audit_recon_half ON audit_reconciliation(match_id,part_id)")
     c.commit()
