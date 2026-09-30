@@ -196,6 +196,24 @@ def lifecycle_page():
         st.warning(f'🟠 Audit reconciliation could not run yet: {e}')
 
     c=conn()
+    # Backfill historical lifecycle metadata from the latest Current Dashboard.
+    # This is especially useful for compact lifecycle files that only contain
+    # Match + Part + Before/After totals.
+    sid=current_snapshot_id()
+    if sid:
+        c.execute(
+            """UPDATE lifecycle_records
+               SET match_name=COALESCE(NULLIF(TRIM(match_name),''),(SELECT s.match_name
+                   FROM match_part_summary s
+                   WHERE s.snapshot_id=? AND s.match_id=lifecycle_records.match_id LIMIT 1)),
+                   competition=COALESCE(NULLIF(TRIM(competition),''),(SELECT s.competition
+                   FROM match_part_summary s
+                   WHERE s.snapshot_id=? AND s.match_id=lifecycle_records.match_id LIMIT 1))
+               WHERE workflow_source IN ('NORMAL_REVIEW','RECOLLECTION')""",
+            (sid,sid)
+        )
+        rebuild_competition_benchmarks(c)
+        c.commit()
     counts=lifecycle_counts(c)
     benchmarks=lifecycle_benchmark_df(c)
     c.close()
