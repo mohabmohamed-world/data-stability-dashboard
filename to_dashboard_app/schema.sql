@@ -94,4 +94,50 @@ CREATE TABLE IF NOT EXISTS reviewed_parts(
  PRIMARY KEY(match_id,part_id));
 CREATE INDEX IF NOT EXISTS idx_reviewed_parts_key ON reviewed_parts(match_id,part_id);
 
+CREATE TABLE IF NOT EXISTS lifecycle_records(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ workflow_source TEXT NOT NULL,
+ cycle_key TEXT NOT NULL,
+ match_id INTEGER NOT NULL,
+ part_id INTEGER NOT NULL,
+ match_name TEXT,
+ competition TEXT,
+ collector TEXT,
+ owner TEXT,
+ reviewer_code TEXT,
+ reviewer_name TEXT,
+ audit_reviewer TEXT,
+ before_total REAL,
+ after_total REAL,
+ audit_total REAL,
+ collection_date TEXT,
+ review_date TEXT,
+ audit_date TEXT,
+ source_name TEXT,
+ note TEXT,
+ imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ fingerprint TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS competition_benchmarks(
+ workflow_source TEXT NOT NULL,
+ competition_key TEXT NOT NULL,
+ competition TEXT NOT NULL,
+ part_id INTEGER NOT NULL DEFAULT 0,
+ sample_size INTEGER NOT NULL DEFAULT 0,
+ mean_audit REAL,
+ median_audit REAL,
+ p10_audit REAL,
+ p25_audit REAL,
+ p75_audit REAL,
+ p90_audit REAL,
+ updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ PRIMARY KEY(workflow_source,competition_key,part_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_half ON lifecycle_records(match_id,part_id);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_source ON lifecycle_records(workflow_source,competition_key) WHERE 0;
+CREATE INDEX IF NOT EXISTS idx_lifecycle_competition ON lifecycle_records(workflow_source,competition,part_id);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_fingerprint ON lifecycle_records(fingerprint);
+
 CREATE INDEX IF NOT EXISTS idx_summary_queue ON match_part_summary(snapshot_id,severity_rank,collection_completion,total_duels);
