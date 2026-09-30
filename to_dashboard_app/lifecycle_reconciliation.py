@@ -67,16 +67,12 @@ def _current_total(c, snapshot_id, match_id, part_id):
     extras_total = float(extras[0] or 0) if extras else 0.0
     total = base_total + extras_total
 
-    # Treat a completely missing key as unavailable rather than a genuine zero.
+    # Base is the authoritative Match + Part universe. Extras-only rows are invalid.
     has_base = c.execute(
         "SELECT 1 FROM raw_base WHERE snapshot_id=? AND event_match_id=? AND event_part_id=? LIMIT 1",
         (snapshot_id, match_id, part_id),
     ).fetchone()
-    has_extras = c.execute(
-        "SELECT 1 FROM extras_current WHERE ex_match_id=? AND ex_part_id=? LIMIT 1",
-        (match_id, part_id),
-    ).fetchone()
-    if not has_base and not has_extras:
+    if not has_base:
         return None
     return total
 
