@@ -227,7 +227,15 @@ def lifecycle_page():
         competitions=sorted([str(x) for x in history['competition'].dropna().unique() if str(x).strip()])
         comp=f2.multiselect('Competition',competitions)
         part=f3.multiselect('Part',[1,2])
-        min_change=f4.number_input('Min |Total Recovery|',0,1000,0)
+        stage=f4.selectbox('Change Stage',['All','Before → After','After → Audit','Before → Audit'])
+
+        f5,f6,f7,f8=st.columns(4)
+        collectors=sorted([str(x) for x in history['collector'].dropna().unique() if str(x).strip()])
+        owners=sorted([str(x) for x in history['owner'].dropna().unique() if str(x).strip()])
+        collector=f5.multiselect('Collector',collectors)
+        owner=f6.multiselect('Owner / Responsible',owners)
+        min_change=f7.number_input('Min Absolute Change',0,1000,0)
+        show_large=f8.checkbox('Show Large Changes Only',value=False)
 
         if src:
             history=history[history['workflow_source'].isin(src)]
@@ -235,11 +243,27 @@ def lifecycle_page():
             history=history[history['competition'].isin(comp)]
         if part:
             history=history[history['part_id'].isin(part)]
+        if collector:
+            history=history[history['collector'].isin(collector)]
+        if owner:
+            history=history[history['owner'].isin(owner)]
+
+        if stage=='Before → After':
+            history['selected_change']=history['qc_or_recollection_change']
+        elif stage=='After → Audit':
+            history['selected_change']=history['audit_change']
+        elif stage=='Before → Audit':
+            history['selected_change']=history['total_recovery']
+        else:
+            history['selected_change']=history['total_recovery']
+
         if min_change:
-            history=history[history['total_recovery'].abs()>=min_change]
+            history=history[history['selected_change'].abs()>=min_change]
+        if show_large:
+            history=history[history['selected_change'].abs()>=10]
 
         st.write(f"{len(history):,} lifecycle rows shown")
-        st.dataframe(history,use_container_width=True,hide_index=True)
+        st.dataframe(history.drop(columns=['selected_change'],errors='ignore'),use_container_width=True,hide_index=True)
         st.download_button(
             '📥 Export Lifecycle History',
             history.to_csv(index=False).encode('utf-8-sig'),
