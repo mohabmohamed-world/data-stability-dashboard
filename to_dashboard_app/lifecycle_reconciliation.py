@@ -95,6 +95,15 @@ def reconcile_recollection_audits(c, snapshot_id):
         expected = float(r.after_total)
         current = _current_total(c, snapshot_id, m, p)
 
+        # Backfill audit metadata from Reviewed Matches into the lifecycle gold row.
+        c.execute(
+            """UPDATE lifecycle_records
+               SET audit_date=COALESCE(NULLIF(TRIM(audit_date),''),?),
+                   audit_reviewer=COALESCE(NULLIF(TRIM(audit_reviewer),''),?)
+               WHERE id=?""",
+            (r.resolved_audit_date, r.resolved_audit_reviewer, lid)
+        )
+
         existing = c.execute(
             "SELECT * FROM audit_reconciliation WHERE lifecycle_id=?",
             (lid,),
@@ -124,6 +133,11 @@ def reconcile_recollection_audits(c, snapshot_id):
                     "Initial observation after audit completion.",
                 ),
             )
+            if audit_total_value is not None:
+                c.execute(
+                    "UPDATE lifecycle_records SET audit_total=? WHERE id=?",
+                    (float(audit_total_value), lid),
+                )
             created += 1
             continue
 
