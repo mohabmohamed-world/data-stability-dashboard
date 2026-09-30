@@ -176,7 +176,48 @@ def import_base_full(c,df,matches_df=None,flags_df=None,reviewers_df=None):
     mid=_pick(d,'event_match_id'); pid=_pick(d,'event_part_id'); ev=_pick(d,'tornado_events','tornado_event')
     b=_pick(d,'events_count_before_completion','events_before'); a=_pick(d,'events_count_after_completion','events_after')
     if not (mid and pid and ev and b and a): raise ValueError('Base file is missing required columns')
+    # Validate the file before creating a CURRENT snapshot.
+    # The Base upload is explicitly a FULL export, so a sudden large coverage
+    # drop is treated as a bad/partial upload rather than a valid CURRENT state.
+    incoming_group_sizes=d.groupby([mid,pid]).size()
+    incoming_event_sets=d.groupby([mid,pid])[ev].nunique()
+    incoming_keys=len(incoming_group_sizes)
+    incoming_invalid=int(((incoming_group_sizes!=8) | (incoming_event_sets!=8)).sum())
+    if incoming_invalid:
+        raise ValueError(
+            f'Base export validation failed: {incoming_invalid:,} Match + Part groups '
+            'do not contain exactly 8 Base event rows / 8 unique event types.'
+        )
+
     prev=c.execute("select id from snapshots where snapshot_type='CURRENT' order by id desc limit 1").fetchone()
+    if prev:
+        prev_id=int(prev[0])
+        prev_keys=c.execute(
+            """SELECT COUNT(DISTINCT CAST(event_match_id AS TEXT)||':'||CAST(event_part_id AS TEXT))
+               FROM raw_base WHERE snapshot_id=?""",
+            (prev_id,)
+        ).fetchone()[0] or 0
+
+        # Prefer the largest valid historical CURRENT as the coverage reference;
+        # this prevents a previously bad partial snapshot from lowering the bar.
+        historical_max=c.execute(
+            """SELECT MAX(key_count) FROM (
+                 SELECT snapshot_id,
+                        COUNT(DISTINCT CAST(event_match_id AS TEXT)||':'||CAST(event_part_id AS TEXT)) AS key_count,
+                        COUNT(*) AS row_count
+                 FROM raw_base
+                 GROUP BY snapshot_id
+                 HAVING row_count=key_count*8
+               )"""
+        ).fetchone()[0] or 0
+        reference_keys=max(int(prev_keys), int(historical_max))
+        if reference_keys and incoming_keys < reference_keys*0.90:
+            raise ValueError(
+                f'Base export looks partial: {incoming_keys:,} Match + Part keys '
+                f'vs {reference_keys:,} in the existing full history. '
+                'Upload the FULL Base export, not a filtered/partial extract.'
+            )
+
     sid=_new_snapshot(c,f"Current {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",'CURRENT','Base full export')
     for i,r in d.iterrows():
         c.execute('insert into raw_base(snapshot_id,source_row,event_match_id,event_part_id,tornado_event,events_count_before_completion,events_count_after_completion,event_percentile_5,event_percentile_95,fifth_outlier,threshold_indicator,collection_date,duplicate_no) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',
