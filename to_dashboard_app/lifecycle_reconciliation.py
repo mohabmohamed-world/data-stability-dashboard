@@ -242,7 +242,7 @@ def reconciliation_df(c):
                     WHEN 'AUDIT_COMPLETED — AWAITING_DASHBOARD_UPDATE' THEN 0
                     WHEN 'AUDITED — CHANGED' THEN 1
                     ELSE 2 END,
-                    ar.audit_date DESC, ar.match_id, ar.part_id""",
+                    COALESCE(NULLIF(TRIM(lr.audit_date),''), NULLIF(TRIM(rp.review_date),'')) DESC, ar.match_id, ar.part_id""",
         c,
     )
 
