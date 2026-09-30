@@ -110,6 +110,33 @@ def conn():
         c.execute('ALTER TABLE reviewed_parts ADD COLUMN complete_flag TEXT')
     if 'audit_reviewer' not in rp_cols:
         c.execute('ALTER TABLE reviewed_parts ADD COLUMN audit_reviewer TEXT')
+
+    # Migration for lifecycle databases created before audit_reviewer was added.
+    # Older Streamlit Cloud DBs persist across code deploys, so CREATE TABLE IF NOT EXISTS
+    # alone does not add newly introduced columns.
+    lifecycle_cols={r[1] for r in c.execute('PRAGMA table_info(lifecycle_records)').fetchall()}
+    for _col,_ddl in [
+        ('match_name','TEXT'),
+        ('competition','TEXT'),
+        ('collector','TEXT'),
+        ('owner','TEXT'),
+        ('reviewer_code','TEXT'),
+        ('reviewer_name','TEXT'),
+        ('audit_reviewer','TEXT'),
+        ('before_total','REAL'),
+        ('after_total','REAL'),
+        ('audit_total','REAL'),
+        ('collection_date','TEXT'),
+        ('review_date','TEXT'),
+        ('audit_date','TEXT'),
+        ('source_name','TEXT'),
+        ('note','TEXT'),
+        ('imported_at','TEXT'),
+        ('fingerprint','TEXT'),
+    ]:
+        if _col not in lifecycle_cols:
+            c.execute(f'ALTER TABLE lifecycle_records ADD COLUMN {_col} {_ddl}')
+
     cols={r[1] for r in c.execute('PRAGMA table_info(review_batch_items)').fetchall()}
     if cols and 'data_updated' not in cols:
         c.execute('ALTER TABLE review_batch_items ADD COLUMN data_updated INTEGER DEFAULT 1')
