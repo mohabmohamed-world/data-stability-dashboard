@@ -126,6 +126,7 @@ def conn():
         ('before_total','REAL'),
         ('after_total','REAL'),
         ('audit_total','REAL'),
+        ('audit_total_source','TEXT'),
         ('collection_date','TEXT'),
         ('review_date','TEXT'),
         ('audit_date','TEXT'),
@@ -136,6 +137,29 @@ def conn():
     ]:
         if _col not in lifecycle_cols:
             c.execute(f'ALTER TABLE lifecycle_records ADD COLUMN {_col} {_ddl}')
+
+    # One-time repair for the Recollection_623 lifecycle file: its Audit column
+    # was intentionally blank. Older reconciliation logic incorrectly copied a
+    # Dashboard Current observation into lifecycle_records.audit_total.
+    # Clear those legacy values; Dashboard observations now live only in
+    # audit_reconciliation.last_observed_total.
+    c.execute("""
+        UPDATE lifecycle_records
+        SET audit_total=NULL,
+            audit_total_source=NULL
+        WHERE workflow_source='RECOLLECTION'
+          AND source_name='Recollection_Lifecycle_623.csv'
+          AND (audit_total_source IS NULL OR audit_total_source='legacy_dashboard_observation')
+    """)
+    # Mark any remaining populated audit_total as source-imported when it came
+    # from a lifecycle file rather than the reconciliation layer.
+    c.execute("""
+        UPDATE lifecycle_records
+        SET audit_total_source='historical_import'
+        WHERE audit_total IS NOT NULL
+          AND (audit_total_source IS NULL OR audit_total_source='')
+          AND source_name <> 'Recollection_Lifecycle_623.csv'
+    """)
 
     cols={r[1] for r in c.execute('PRAGMA table_info(review_batch_items)').fetchall()}
     if cols and 'data_updated' not in cols:
@@ -494,9 +518,10 @@ def lifecycle_page():
     history=pd.read_sql_query(
         """SELECT lr.workflow_source,lr.cycle_key,lr.match_id,lr.part_id,lr.match_name,lr.competition,lr.collector,lr.owner,
                   lr.reviewer_code,lr.reviewer_name,lr.audit_reviewer,lr.before_total,lr.after_total,lr.audit_total,
+                  ar.last_observed_total AS dashboard_observed_total,
                   ROUND(lr.after_total-lr.before_total,2) qc_or_recollection_change,
-                  ROUND(lr.audit_total-lr.after_total,2) audit_change,
-                  ROUND(lr.audit_total-lr.before_total,2) total_recovery,
+                  CASE WHEN lr.audit_total IS NOT NULL THEN ROUND(lr.audit_total-lr.after_total,2) END AS audit_change,
+                  CASE WHEN lr.audit_total IS NOT NULL THEN ROUND(lr.audit_total-lr.before_total,2) END AS total_recovery,
                   lr.collection_date,lr.review_date,lr.audit_date,lr.source_name,
                   CASE
                     WHEN lr.workflow_source='RECOLLECTION' THEN
