@@ -358,17 +358,22 @@ def reconcile_recollection_audits(c, snapshot_id):
 
 
 def reconciliation_df(c):
-    return pd.read_sql_query(
+    latest = c.execute(
+        "SELECT id FROM snapshots WHERE snapshot_type='CURRENT' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    latest_id = int(latest[0]) if latest else None
+
+    df = pd.read_sql_query(
         """SELECT ar.workflow_source, ar.match_id, ar.part_id,
                   lr.match_name, lr.competition, lr.collector, lr.owner,
                   COALESCE(NULLIF(TRIM(lr.audit_reviewer),''), NULLIF(TRIM(rp.audit_reviewer),'')) AS audit_reviewer,
                   COALESCE(NULLIF(TRIM(lr.audit_date),''), NULLIF(TRIM(rp.review_date),'')) AS audit_date,
                   ar.expected_after_total AS after_recollection,
-                  ar.last_observed_total AS dashboard_current,
+                  ar.last_observed_total AS confirmed_dashboard_observation,
                   CASE
-                    WHEN ar.changed_total IS NOT NULL
-                    THEN ar.changed_total - ar.expected_after_total
-                    ELSE 0
+                    WHEN ar.last_observed_total IS NOT NULL
+                    THEN ar.last_observed_total - ar.expected_after_total
+                    ELSE NULL
                   END AS audit_delta,
                   ar.status,
                   ar.first_observation_snapshot_id,
@@ -386,6 +391,48 @@ def reconciliation_df(c):
         c,
     )
 
+    def live_total(row):
+        if latest_id is None:
+            return None
+        m, p = int(row["match_id"]), int(row["part_id"])
+        base = c.execute(
+            """SELECT COALESCE(SUM(events_count_after_completion),0)
+               FROM raw_base
+               WHERE snapshot_id=? AND event_match_id=? AND event_part_id=?""",
+            (latest_id, m, p),
+        ).fetchone()
+        extras = c.execute(
+            """SELECT COALESCE(SUM(extras_counter),0)
+               FROM extras_current
+               WHERE ex_match_id=? AND ex_part_id=?""",
+            (m, p),
+        ).fetchone()
+        has_base = c.execute(
+            "SELECT 1 FROM raw_base WHERE snapshot_id=? AND event_match_id=? AND event_part_id=? LIMIT 1",
+            (latest_id, m, p),
+        ).fetchone()
+        has_extras = c.execute(
+            "SELECT 1 FROM extras_current WHERE ex_match_id=? AND ex_part_id=? LIMIT 1",
+            (m, p),
+        ).fetchone()
+        if not has_base and not has_extras:
+            return None
+        return float(base[0] or 0) + float(extras[0] or 0)
+
+    if not df.empty:
+        df["latest_current_snapshot_id"] = latest_id
+        df["latest_dashboard_current"] = [live_total(r) for _, r in df.iterrows()]
+        # Keep dashboard_current as the live value displayed to the user.
+        df["dashboard_current"] = df["latest_dashboard_current"]
+        cols=[
+            "workflow_source","match_id","part_id","match_name","competition","collector","owner",
+            "audit_reviewer","audit_date","after_recollection","dashboard_current",
+            "confirmed_dashboard_observation","audit_delta","status",
+            "first_observation_snapshot_id","last_observation_snapshot_id",
+            "latest_current_snapshot_id","last_checked_at","note"
+        ]
+        df=df[cols]
+    return df
 
 def reconciliation_counts(c):
     row = c.execute(
