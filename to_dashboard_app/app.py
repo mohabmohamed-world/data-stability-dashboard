@@ -188,6 +188,13 @@ def lifecycle_page():
     st.title('🧬 Lifecycle & Audit Benchmarks')
     st.caption('Historical truth layer: NORMAL REVIEW = Before → QC After → Audit; RECOLLECTION = Before Recollection → After Recollection → Audit.')
 
+    # Refresh the audit-vs-dashboard reconciliation whenever this page is opened.
+    # Keep the page usable even when the reconciliation source is not ready yet.
+    try:
+        run_audit_reconciliation()
+    except Exception as e:
+        st.warning(f'🟠 Audit reconciliation could not run yet: {e}')
+
     c=conn()
     counts=lifecycle_counts(c)
     benchmarks=lifecycle_benchmark_df(c)
