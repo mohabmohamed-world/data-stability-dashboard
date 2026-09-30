@@ -1,5 +1,7 @@
 from pathlib import Path
 from datetime import datetime
+import hashlib
+import json
 import sqlite3
 import os
 import pandas as pd
@@ -352,40 +354,65 @@ def _streamlit_secret(name, default=''):
         return default
 
 
+def _reviewed_sheet_fingerprint(rows):
+    # Canonical, order-independent fingerprint so sorting the Google Sheet does not
+    # trigger a needless reload. Values are serialized as strings for stability.
+    canonical=[]
+    for row in rows or []:
+        canonical.append(json.dumps({str(k): str(v) for k,v in row.items()}, sort_keys=True, ensure_ascii=False))
+    payload="\n".join(sorted(canonical)).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
 @st.fragment(run_every="2m")
-def live_reviewed_matches_sync(sid):
+def live_reviewed_matches_sync():
     url=_streamlit_secret('GOOGLE_SYNC_URL')
     secret=_streamlit_secret('GOOGLE_SYNC_SECRET')
     if not url or not secret:
-        st.caption('🟡 Live Google Sheets sync is not configured yet.')
         return
 
     try:
         payload=pull_sheet(url, secret, 'Reviewed Matches')
         rows=payload.get('rows', [])
-        fingerprint=pd.util.hash_pandas_object(
-            pd.DataFrame(rows).fillna('').astype(str),
-            index=True
-        ).astype('uint64').sum() if rows else 0
+        if not isinstance(rows, list):
+            raise ValueError('Reviewed Matches response is not a row list.')
+
+        fingerprint=_reviewed_sheet_fingerprint(rows)
         old=st.session_state.get('reviewed_sheet_fingerprint')
-        if old is None:
-            st.session_state['reviewed_sheet_fingerprint']=int(fingerprint)
+        current_db_count=scalar('SELECT COUNT(*) FROM reviewed_parts')
+
+        # Safety guard: never erase a populated exclusion list because the source
+        # sheet temporarily returned no rows (for example during a permissions/
+        # deployment/connection issue). An intentional empty source can still
+        # initialize an empty DB when there is nothing stored yet.
+        if not rows and current_db_count > 0:
+            st.sidebar.warning(
+                f'🟠 Reviewed Matches sync returned 0 rows; keeping {current_db_count:,} existing keys.'
+            )
+            st.sidebar.caption('No database replacement was performed.')
+            return
+
+        if old is None or old != fingerprint:
             c=conn()
-            n=import_reviewed_parts(c,pd.DataFrame(rows),'Google Sheets — Reviewed Matches (Live)')
+            n=import_reviewed_parts(
+                c,
+                pd.DataFrame(rows),
+                'Google Sheets — Reviewed Matches (Live)'
+            )
             c.close()
+            st.session_state['reviewed_sheet_fingerprint']=fingerprint
             st.session_state['reviewed_sheet_count']=n
+            # Refresh the page so the new exclusion count is immediately visible.
             st.rerun()
-        elif int(old) != int(fingerprint):
-            st.session_state['reviewed_sheet_fingerprint']=int(fingerprint)
-            c=conn()
-            n=import_reviewed_parts(c,pd.DataFrame(rows),'Google Sheets — Reviewed Matches (Live)')
-            c.close()
-            st.session_state['reviewed_sheet_count']=n
-            st.rerun()
-        count=st.session_state.get('reviewed_sheet_count', len(rows))
-        st.caption(f'🟢 Live Reviewed Matches sync — {count:,} keys | checked every 2 min')
+        else:
+            st.session_state['reviewed_sheet_count']=current_db_count
+
+        count=st.session_state.get('reviewed_sheet_count', current_db_count)
+        st.sidebar.caption(
+            f'🟢 Reviewed Matches live sync: {count:,} keys | checked every 2 min'
+        )
     except Exception as e:
-        st.warning(f'🟠 Live Reviewed Matches sync unavailable: {e}')
+        st.sidebar.warning(f'🟠 Reviewed Matches live sync unavailable: {e}')
 
 
 def queue_page():
@@ -394,8 +421,6 @@ def queue_page():
     if not sid:
         st.info('Import Base first.')
         return
-
-    live_reviewed_matches_sync(sid)
 
     # Recollection input + decision layer.
     st.subheader('🔁 Recollection Review')
@@ -763,6 +788,7 @@ def compare_page():
                        file_name='to_dashboard_before_vs_after_detailed.csv',mime='text/csv')
 
 page=st.sidebar.radio('Navigation',['📊 Dashboard','🔎 Detailed Dashboard','📥 Import / Update','📋 Review Queue','🔄 Review Lifecycle','⚠️ Missing Metadata','🔄 Before vs After','🔗 Google Sheets Sync'])
+live_reviewed_matches_sync()
 if page=='📊 Dashboard': dashboard()
 elif page=='🔎 Detailed Dashboard': detailed_dashboard_page()
 elif page=='📥 Import / Update': import_page()
