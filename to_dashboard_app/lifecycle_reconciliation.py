@@ -128,6 +128,15 @@ def reconcile_recollection_audits(c, snapshot_id):
         old_status = str(existing["status"])
         first_snapshot = existing["first_observation_snapshot_id"]
         status = old_status
+
+        # Backfill the resolved audit metadata if this reconciliation row was
+        # created before Complete/Review Date metadata became available.
+        c.execute(
+            """UPDATE audit_reconciliation
+               SET audit_completed_at=COALESCE(NULLIF(audit_completed_at,''),?)
+               WHERE lifecycle_id=?""",
+            (r.resolved_audit_date, lid)
+        )
         changed_total = existing["changed_total"]
 
         if old_status == STATUS_AWAITING:
