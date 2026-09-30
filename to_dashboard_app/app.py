@@ -160,10 +160,52 @@ def reviewed_parts_count():
 
 
 def current_snapshot_id():
+    """
+    Return the latest trustworthy FULL Base snapshot.
+
+    A malformed/partial Base upload must never become the dashboard's active
+    CURRENT snapshot. We identify valid candidates by requiring exactly 8
+    unique Base event rows per Match + Part, then prefer a candidate whose
+    Match + Part coverage is close to the largest valid snapshot in history.
+    """
     c=conn()
-    row=c.execute("SELECT id FROM snapshots WHERE snapshot_type='CURRENT' ORDER BY id DESC LIMIT 1").fetchone()
+    rows=c.execute("""
+        SELECT s.id,
+               COUNT(DISTINCT CAST(rb.event_match_id AS TEXT)||':'||CAST(rb.event_part_id AS TEXT)) AS key_count,
+               COUNT(*) AS base_rows
+        FROM snapshots s
+        JOIN raw_base rb ON rb.snapshot_id=s.id
+        WHERE s.snapshot_type='CURRENT'
+        GROUP BY s.id
+        ORDER BY s.id DESC
+    """).fetchall()
+
+    candidates=[]
+    for r in rows:
+        sid=int(r[0]); key_count=int(r[1] or 0); base_rows=int(r[2] or 0)
+        groups=c.execute(
+            """SELECT COUNT(*) FROM (
+                 SELECT event_match_id,event_part_id
+                 FROM raw_base
+                 WHERE snapshot_id=?
+                 GROUP BY event_match_id,event_part_id
+                 HAVING COUNT(*)=8 AND COUNT(DISTINCT tornado_event)=8
+               )""",
+            (sid,),
+        ).fetchone()[0]
+        if key_count>0 and groups==key_count and base_rows==key_count*8:
+            candidates.append((sid,key_count,base_rows))
+
+    if not candidates:
+        c.close()
+        return None
+
+    max_keys=max(x[1] for x in candidates)
+    coverage_floor=max_keys*0.90
+    eligible=[x for x in candidates if x[1] >= coverage_floor]
+    chosen=max(eligible,key=lambda x:x[0])
     c.close()
-    return row[0] if row else None
+    return chosen[0]
 
 
 def assign_next_batch(sid):
