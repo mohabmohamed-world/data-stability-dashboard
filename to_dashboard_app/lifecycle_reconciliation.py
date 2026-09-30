@@ -43,12 +43,42 @@ def ensure_reconciliation_table(c):
 
 
 def _current_total(c, snapshot_id, match_id, part_id):
-    row = c.execute(
-        """SELECT total_duels FROM match_part_summary
-           WHERE snapshot_id=? AND match_id=? AND part_id=?""",
+    """
+    Calculate the live CURRENT total directly from the source tables.
+
+    Do not rely on match_part_summary here: reconciliation must validate the
+    dashboard against the imported raw Base after-completion counts plus the
+    live Extras counters. This prevents a stale/corrupted summary row from
+    masquerading as the current Dashboard value.
+    """
+    base = c.execute(
+        """SELECT COALESCE(SUM(events_count_after_completion),0)
+           FROM raw_base
+           WHERE snapshot_id=? AND event_match_id=? AND event_part_id=?""",
         (snapshot_id, match_id, part_id),
     ).fetchone()
-    return float(row[0]) if row and row[0] is not None else None
+    extras = c.execute(
+        """SELECT COALESCE(SUM(extras_counter),0)
+           FROM extras_current
+           WHERE ex_match_id=? AND ex_part_id=?""",
+        (match_id, part_id),
+    ).fetchone()
+    base_total = float(base[0] or 0) if base else 0.0
+    extras_total = float(extras[0] or 0) if extras else 0.0
+    total = base_total + extras_total
+
+    # Treat a completely missing key as unavailable rather than a genuine zero.
+    has_base = c.execute(
+        "SELECT 1 FROM raw_base WHERE snapshot_id=? AND event_match_id=? AND event_part_id=? LIMIT 1",
+        (snapshot_id, match_id, part_id),
+    ).fetchone()
+    has_extras = c.execute(
+        "SELECT 1 FROM extras_current WHERE ex_match_id=? AND ex_part_id=? LIMIT 1",
+        (match_id, part_id),
+    ).fetchone()
+    if not has_base and not has_extras:
+        return None
+    return total
 
 
 def _snapshot_created_at(c, snapshot_id):
