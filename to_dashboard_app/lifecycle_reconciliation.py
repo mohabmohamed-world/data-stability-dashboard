@@ -103,9 +103,11 @@ def reconcile_recollection_audits(c, snapshot_id):
         if existing is None:
             status = STATUS_AWAITING
             changed_total = None
+            audit_total_value = None
             if current is not None and current != expected:
                 status = STATUS_CHANGED
                 changed_total = current
+                audit_total_value = current
                 changed += 1
             else:
                 awaiting += 1
@@ -138,27 +140,40 @@ def reconcile_recollection_audits(c, snapshot_id):
             (r.resolved_audit_date, lid)
         )
         changed_total = existing["changed_total"]
+        audit_total_value = None
 
         if old_status == STATUS_AWAITING:
             if current is not None and current != expected:
                 status = STATUS_CHANGED
                 changed_total = current
+                audit_total_value = current
                 changed += 1
             elif first_snapshot is not None and int(snapshot_id) > int(first_snapshot):
                 # This is the delayed-dashboard confirmation: a later snapshot
                 # still equals the Recollection After value, so there is no net change.
                 status = STATUS_NO_CHANGE
+                changed_total = expected
+                audit_total_value = expected
                 no_change += 1
             else:
                 awaiting += 1
         elif old_status == STATUS_CHANGED:
             changed_total = changed_total if changed_total is not None else current
+            audit_total_value = changed_total
         elif old_status == STATUS_NO_CHANGE:
             # Keep historical NO CHANGE unless a later snapshot actually changes.
+            audit_total_value = expected
             if current is not None and current != expected:
                 status = STATUS_CHANGED
                 changed_total = current
+                audit_total_value = current
                 changed += 1
+
+        if audit_total_value is not None:
+            c.execute(
+                "UPDATE lifecycle_records SET audit_total=? WHERE id=?",
+                (float(audit_total_value), lid),
+            )
 
         c.execute(
             """UPDATE audit_reconciliation
