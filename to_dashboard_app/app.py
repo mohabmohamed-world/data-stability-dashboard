@@ -348,6 +348,39 @@ def lifecycle_page():
         st.warning(f'🟠 Reconciliation view is temporarily unavailable; Lifecycle uploads are still enabled. Details: {e}')
     finally:
         rc.close()
+    # Manual Reviewed Matches import is the fallback when live Google Sheets
+    # credentials are not configured. The file must contain Match ID + Part ID,
+    # and ideally Complete/Completed plus Audit Reviewer / Review Date.
+    st.subheader('📥 Reviewed Matches for Audit Reconciliation')
+    st.caption('Live Google Sheets sync is optional. Upload the latest Reviewed Matches export here when GOOGLE_SYNC_URL / GOOGLE_SYNC_SECRET are not configured.')
+    reviewed_recon_up=st.file_uploader(
+        'Latest Reviewed Matches export',
+        type=['csv','tsv','txt'],
+        key='lifecycle_reviewed_matches_upload'
+    )
+    if reviewed_recon_up and st.button('🔄 Load Reviewed Matches & Reconcile', key='load_reviewed_recon', type='primary'):
+        try:
+            rc=conn()
+            reviewed_df=read_table_bytes(reviewed_recon_up.getvalue(), reviewed_recon_up.name)
+            loaded=import_reviewed_parts(rc, reviewed_df, f'Lifecycle Audit Reconciliation — {reviewed_recon_up.name}')
+            sid=current_snapshot_id()
+            recon_result=reconcile_recollection_audits(rc, sid) if sid else {'completed_audits':0,'created':0,'updated':0,'awaiting':0,'changed':0,'no_net_change':0}
+            rc.close()
+            st.success(
+                f'✅ Loaded {loaded:,} Reviewed Match + Part keys | '
+                f'Audit complete: {recon_result["completed_audits"]:,} | '
+                f'Awaiting update: {recon_result["awaiting"]:,} | '
+                f'Changed: {recon_result["changed"]:,} | '
+                f'No net change: {recon_result["no_net_change"]:,}'
+            )
+            st.rerun()
+        except Exception as e:
+            try:
+                rc.close()
+            except Exception:
+                pass
+            st.error(f'❌ Reviewed Matches import/reconciliation failed: {e}')
+
     q1,q2,q3,q4=st.columns(4)
     q1.metric('Audit Completed',f"{rcounts['total']:,}")
     q2.metric('Awaiting Dashboard Update',f"{rcounts['awaiting']:,}")
