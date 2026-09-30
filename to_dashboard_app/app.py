@@ -10,6 +10,7 @@ import streamlit as st
 from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df, import_lifecycle_history, rebuild_competition_benchmarks, lifecycle_counts, lifecycle_benchmark_df
 from gsheets_sync import test_connection, pull_all, pull_sheet, push_rows
 from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, import_distributed_parts, latest_run, recollection_counts, recollection_funnel, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
+from lifecycle_reconciliation import ensure_reconciliation_table, reconcile_recollection_audits, reconciliation_df, reconciliation_counts
 
 APP_DIR=Path(__file__).resolve().parent
 # Streamlit Community Cloud uses a mounted source tree that is not a good place
@@ -103,6 +104,12 @@ def conn():
         PRIMARY KEY(workflow_source,competition_key,part_id))''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_lifecycle_half ON lifecycle_records(match_id,part_id)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_lifecycle_competition ON lifecycle_records(workflow_source,competition,part_id)')
+    ensure_reconciliation_table(c)
+    rp_cols={r[1] for r in c.execute('PRAGMA table_info(reviewed_parts)').fetchall()}
+    if 'complete_flag' not in rp_cols:
+        c.execute('ALTER TABLE reviewed_parts ADD COLUMN complete_flag TEXT')
+    if 'audit_reviewer' not in rp_cols:
+        c.execute('ALTER TABLE reviewed_parts ADD COLUMN audit_reviewer TEXT')
     cols={r[1] for r in c.execute('PRAGMA table_info(review_batch_items)').fetchall()}
     if cols and 'data_updated' not in cols:
         c.execute('ALTER TABLE review_batch_items ADD COLUMN data_updated INTEGER DEFAULT 1')
@@ -139,6 +146,16 @@ def assign_next_batch(sid):
     finally:
         c.close()
 
+
+def run_audit_reconciliation():
+    sid=current_snapshot_id()
+    if not sid:
+        return {'completed_audits':0,'created':0,'updated':0,'awaiting':0,'changed':0,'no_net_change':0}
+    c=conn()
+    try:
+        return reconcile_recollection_audits(c,sid)
+    finally:
+        c.close()
 
 def lifecycle_page():
     st.title('🧬 Lifecycle & Audit Benchmarks')
@@ -566,7 +583,8 @@ def _reviewed_sheet_fingerprint(rows):
 
 
 @st.fragment(run_every="2m")
-def live_reviewed_matches_sync():
+def live_reviewed_matches_sync()
+run_audit_reconciliation():
     url=_streamlit_secret('GOOGLE_SYNC_URL')
     secret=_streamlit_secret('GOOGLE_SYNC_SECRET')
     if not url or not secret:
