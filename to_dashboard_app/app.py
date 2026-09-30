@@ -272,7 +272,11 @@ def lifecycle_page():
                WHERE workflow_source IN ('NORMAL_REVIEW','RECOLLECTION')""",
             (sid,sid)
         )
-        rebuild_competition_benchmarks(c)
+        try:
+            rebuild_competition_benchmarks(c)
+        except Exception as e:
+            # Benchmark generation must never block Lifecycle / Audit reconciliation.
+            st.warning(f'🟠 Competition benchmarks could not be rebuilt yet: {e}')
         c.commit()
     counts=lifecycle_counts(c)
     benchmarks=lifecycle_benchmark_df(c)
