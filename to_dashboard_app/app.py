@@ -7,7 +7,7 @@ import os
 import pandas as pd
 import streamlit as st
 
-from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df
+from import_engine import read_table_bytes, import_base_full, import_extras_seed, import_extras_daily_file, import_flags, import_reviewers, import_reviewed_parts, build_base_summary, patch_metadata_df, SEVERITY_ORDER, create_review_batch, mark_reviewed_from_list, review_batch_stats, export_remaining_df, import_lifecycle_history, rebuild_competition_benchmarks, lifecycle_counts, lifecycle_benchmark_df
 from gsheets_sync import test_connection, pull_all, pull_sheet, push_rows
 from recollection_engine import ensure_recollection_tables, import_recollection, import_recollection_ops, import_recollection_benchmark, import_distributed_parts, latest_run, recollection_counts, recollection_funnel, recollection_queue_df, smart_assign_next_batch, refresh_recollection_status
 
@@ -64,6 +64,45 @@ def conn():
         PRIMARY KEY(match_id,part_id))''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_reviewed_parts_key ON reviewed_parts(match_id,part_id)')
     ensure_recollection_tables(c)
+    c.execute('''CREATE TABLE IF NOT EXISTS lifecycle_records(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_source TEXT NOT NULL,
+        cycle_key TEXT NOT NULL,
+        match_id INTEGER NOT NULL,
+        part_id INTEGER NOT NULL,
+        match_name TEXT,
+        competition TEXT,
+        collector TEXT,
+        owner TEXT,
+        reviewer_code TEXT,
+        reviewer_name TEXT,
+        audit_reviewer TEXT,
+        before_total REAL,
+        after_total REAL,
+        audit_total REAL,
+        collection_date TEXT,
+        review_date TEXT,
+        audit_date TEXT,
+        source_name TEXT,
+        note TEXT,
+        imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        fingerprint TEXT NOT NULL UNIQUE)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS competition_benchmarks(
+        workflow_source TEXT NOT NULL,
+        competition_key TEXT NOT NULL,
+        competition TEXT NOT NULL,
+        part_id INTEGER NOT NULL DEFAULT 0,
+        sample_size INTEGER NOT NULL DEFAULT 0,
+        mean_audit REAL,
+        median_audit REAL,
+        p10_audit REAL,
+        p25_audit REAL,
+        p75_audit REAL,
+        p90_audit REAL,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(workflow_source,competition_key,part_id))''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_lifecycle_half ON lifecycle_records(match_id,part_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_lifecycle_competition ON lifecycle_records(workflow_source,competition,part_id)')
     cols={r[1] for r in c.execute('PRAGMA table_info(review_batch_items)').fetchall()}
     if cols and 'data_updated' not in cols:
         c.execute('ALTER TABLE review_batch_items ADD COLUMN data_updated INTEGER DEFAULT 1')
@@ -99,6 +138,144 @@ def assign_next_batch(sid):
         return smart_assign_next_batch(c,sid)
     finally:
         c.close()
+
+
+def lifecycle_page():
+    st.title('🧬 Lifecycle & Audit Benchmarks')
+    st.caption('Historical truth layer: NORMAL REVIEW = Before → QC After → Audit; RECOLLECTION = Before Recollection → After Recollection → Audit.')
+
+    c=conn()
+    counts=lifecycle_counts(c)
+    benchmarks=lifecycle_benchmark_df(c)
+    c.close()
+
+    a,b,c1,d=st.columns(4)
+    a.metric('Lifecycle Records',f"{counts['total']:,}")
+    b.metric('Normal Review',f"{counts['normal_count']:,}")
+    c1.metric('Recollection',f"{counts['recollection_count']:,}")
+    d.metric('Audited Records',f"{counts['audited_count']:,}")
+
+    st.subheader('1) Load Historical Lifecycle')
+    st.info('كل صف هنا يمثل Match + Part + دورة مراجعة تاريخية. النظام يحفظ Source بوضوح حتى نعرف هل التغيير جاء من Normal Review أم Recollection.')
+
+    u1,u2=st.columns(2)
+    with u1:
+        normal_up=st.file_uploader('Normal Review History (Before → QC → Audit)',type=['csv','tsv','txt'],key='lifecycle_normal_upload')
+        if normal_up and st.button('📥 Load Normal Review History',type='primary',key='load_normal_lifecycle'):
+            try:
+                c=conn()
+                result=import_lifecycle_history(c,read_table_bytes(normal_up.getvalue(),normal_up.name),'NORMAL_REVIEW',normal_up.name)
+                rebuilt=rebuild_competition_benchmarks(c)
+                c.close()
+                st.success(f"Loaded {result['inserted']:,} rows ✅ | Benchmarks rebuilt: {rebuilt:,} groups.")
+                if any(result['warnings'].values()):
+                    st.warning(f"Missing stage values — Before: {result['warnings']['missing_before']:,} | After: {result['warnings']['missing_after']:,} | Audit: {result['warnings']['missing_audit']:,}")
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Normal Review lifecycle import failed: {e}')
+
+    with u2:
+        rec_hist_up=st.file_uploader('Recollection History (Before → Recollection After → Audit)',type=['csv','tsv','txt'],key='lifecycle_recollection_upload')
+        if rec_hist_up and st.button('📥 Load Recollection History',type='primary',key='load_recollection_lifecycle'):
+            try:
+                c=conn()
+                result=import_lifecycle_history(c,read_table_bytes(rec_hist_up.getvalue(),rec_hist_up.name),'RECOLLECTION',rec_hist_up.name)
+                rebuilt=rebuild_competition_benchmarks(c)
+                c.close()
+                st.success(f"Loaded {result['inserted']:,} rows ✅ | Benchmarks rebuilt: {rebuilt:,} groups.")
+                if any(result['warnings'].values()):
+                    st.warning(f"Missing stage values — Before: {result['warnings']['missing_before']:,} | After: {result['warnings']['missing_after']:,} | Audit: {result['warnings']['missing_audit']:,}")
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Recollection lifecycle import failed: {e}')
+
+    template=pd.DataFrame([{
+        'Match ID':1516800,'Part':1,'Match Name':'Example Match','Competition':'Example Competition',
+        'Collector':'Collector','Owner':'Owner','Reviewer Code':'R001','Reviewer Name':'Reviewer',
+        'Audit Reviewer':'Auditor','Cycle Key':'2026-09-30-CYCLE-1',
+        'Before':14,'After':31,'Audit':33,
+        'Collection Date':'2026-09-01','Review Date':'2026-09-02','Audit Date':'2026-09-03','Comment':''
+    }])
+    st.download_button(
+        '📄 Download Lifecycle Import Template',
+        template.to_csv(index=False).encode('utf-8-sig'),
+        file_name='lifecycle_import_template.csv',
+        mime='text/csv'
+    )
+
+    st.divider()
+    c=conn()
+    history=pd.read_sql_query(
+        """SELECT workflow_source,cycle_key,match_id,part_id,match_name,competition,collector,owner,
+                  reviewer_code,reviewer_name,audit_reviewer,before_total,after_total,audit_total,
+                  ROUND(after_total-before_total,2) qc_or_recollection_change,
+                  ROUND(audit_total-after_total,2) audit_change,
+                  ROUND(audit_total-before_total,2) total_recovery,
+                  collection_date,review_date,audit_date,source_name
+           FROM lifecycle_records
+           ORDER BY COALESCE(audit_date,review_date,collection_date) DESC,id DESC""",
+        c
+    )
+    c.close()
+
+    st.subheader('2) Historical Lifecycle Explorer')
+    if history.empty:
+        st.info('لسه مفيش Historical Lifecycle Data. ارفع ملفات Normal Review / Recollection من فوق.')
+    else:
+        f1,f2,f3,f4=st.columns(4)
+        src=f1.multiselect('Review Source',['NORMAL_REVIEW','RECOLLECTION'],default=['NORMAL_REVIEW','RECOLLECTION'])
+        competitions=sorted([str(x) for x in history['competition'].dropna().unique() if str(x).strip()])
+        comp=f2.multiselect('Competition',competitions)
+        part=f3.multiselect('Part',[1,2])
+        min_change=f4.number_input('Min |Total Recovery|',0,1000,0)
+
+        if src:
+            history=history[history['workflow_source'].isin(src)]
+        if comp:
+            history=history[history['competition'].isin(comp)]
+        if part:
+            history=history[history['part_id'].isin(part)]
+        if min_change:
+            history=history[history['total_recovery'].abs()>=min_change]
+
+        st.write(f"{len(history):,} lifecycle rows shown")
+        st.dataframe(history,use_container_width=True,hide_index=True)
+        st.download_button(
+            '📥 Export Lifecycle History',
+            history.to_csv(index=False).encode('utf-8-sig'),
+            file_name='historical_lifecycle_history.csv',
+            mime='text/csv'
+        )
+
+    st.divider()
+    st.subheader('3) Audit-Based Competition Benchmarks')
+    if benchmarks.empty:
+        st.info('No audit benchmark exists yet. Benchmarks are built from lifecycle rows with a populated Audit value.')
+    else:
+        bv=benchmarks.copy()
+        bv['Part']=bv['part_id'].replace({0:'ALL'})
+        bf1,bf2=st.columns(2)
+        bsrc=bf1.multiselect('Benchmark Source',['NORMAL_REVIEW','RECOLLECTION'],default=['NORMAL_REVIEW','RECOLLECTION'])
+        bcomp_options=sorted([str(x) for x in bv['competition'].dropna().unique() if str(x).strip()])
+        bcomp=bf2.multiselect('Benchmark Competition',bcomp_options)
+        if bsrc:
+            bv=bv[bv['workflow_source'].isin(bsrc)]
+        if bcomp:
+            bv=bv[bv['competition'].isin(bcomp)]
+        st.dataframe(
+            bv[['workflow_source','competition','Part','sample_size','mean_audit','median_audit','p10_audit','p25_audit','p75_audit','p90_audit','updated_at']],
+            use_container_width=True,hide_index=True
+        )
+        st.caption('الـBenchmark هنا مبني على After Audit، وPart=ALL هو fallback للبطولة كلها عندما لا يتوفر benchmark خاص بالشوط.')
+
+    st.divider()
+    st.subheader('4) What the future Queue will use')
+    st.write('The next distribution layer will use these audit-based benchmarks as a context/priority signal:')
+    st.code(
+        "Source → Competition → Part → Historical Audit Range → Current/Before → Change Stage → Owner/Collector",
+        language='text'
+    )
+    st.caption('لسه ما غيّرناش الـdistribution gate الحالية في هذه المرحلة؛ بنبني الـhistorical truth أولاً، ثم نوصلها بالـQueue criteria.')
 
 
 def google_sheets_sync_page():
@@ -787,11 +964,12 @@ def compare_page():
                        out[display].to_csv(index=False).encode('utf-8-sig'),
                        file_name='to_dashboard_before_vs_after_detailed.csv',mime='text/csv')
 
-page=st.sidebar.radio('Navigation',['📊 Dashboard','🔎 Detailed Dashboard','📥 Import / Update','📋 Review Queue','🔄 Review Lifecycle','⚠️ Missing Metadata','🔄 Before vs After','🔗 Google Sheets Sync'])
+page=st.sidebar.radio('Navigation',['📊 Dashboard','🔎 Detailed Dashboard','📥 Import / Update','🧬 Lifecycle & Benchmarks','📋 Review Queue','🔄 Review Lifecycle','⚠️ Missing Metadata','🔄 Before vs After','🔗 Google Sheets Sync'])
 live_reviewed_matches_sync()
 if page=='📊 Dashboard': dashboard()
 elif page=='🔎 Detailed Dashboard': detailed_dashboard_page()
 elif page=='📥 Import / Update': import_page()
+elif page=='🧬 Lifecycle & Benchmarks': lifecycle_page()
 elif page=='📋 Review Queue': queue_page()
 elif page=='🔄 Review Lifecycle': review_lifecycle_page()
 elif page=='⚠️ Missing Metadata': missing_page()
