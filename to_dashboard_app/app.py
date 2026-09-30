@@ -172,6 +172,26 @@ def lifecycle_page():
     c1.metric('Recollection',f"{counts['recollection_count']:,}")
     d.metric('Audited Records',f"{counts['audited_count']:,}")
 
+    st.subheader('🔄 Audit → Dashboard Reconciliation')
+    st.caption('Audit completion is an event. Dashboard Current is a delayed observation. An audited half stays tracked until a later snapshot confirms CHANGED or NO NET CHANGE.')
+    rc=conn()
+    rcounts=reconciliation_counts(rc)
+    rdf=reconciliation_df(rc)
+    rc.close()
+    q1,q2,q3,q4=st.columns(4)
+    q1.metric('Audit Completed',f"{rcounts['total']:,}")
+    q2.metric('Awaiting Dashboard Update',f"{rcounts['awaiting']:,}")
+    q3.metric('Audited — Changed',f"{rcounts['changed']:,}")
+    q4.metric('Audited — No Net Change',f"{rcounts['no_net_change']:,}")
+    if not rdf.empty:
+        fs1,fs2=st.columns(2)
+        statuses=sorted(rdf['status'].dropna().unique().tolist())
+        selected_status=fs1.multiselect('Reconciliation Status',statuses,default=statuses,key='audit_recon_status')
+        selected_source=fs2.multiselect('Source',['RECOLLECTION','NORMAL_REVIEW'],default=['RECOLLECTION'],key='audit_recon_source')
+        view=rdf[rdf['status'].isin(selected_status) & rdf['workflow_source'].isin(selected_source)]
+        st.dataframe(view,use_container_width=True,hide_index=True)
+        st.download_button('📥 Export Audit Reconciliation',view.to_csv(index=False).encode('utf-8-sig'),file_name='audit_reconciliation.csv',mime='text/csv')
+
     st.subheader('1) Load Historical Lifecycle')
     st.info('كل صف هنا يمثل Match + Part + دورة مراجعة تاريخية. النظام يحفظ Source بوضوح حتى نعرف هل التغيير جاء من Normal Review أم Recollection.')
 
