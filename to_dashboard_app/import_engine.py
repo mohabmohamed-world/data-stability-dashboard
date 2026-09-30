@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-import io, os, sqlite3, re
+import io, os, sqlite3, re, hashlib
 from datetime import datetime
 import pandas as pd
 
@@ -290,3 +290,230 @@ def import_extras_daily(conn,df,snapshot_id): return 0
 def build_base_comparisons(conn,before_snapshot_id,current_snapshot_id): return 0
 def refresh_review_batches_for_base(conn,snapshot_id): return 0
 def refresh_review_batches_for_extras(conn,snapshot_id): return 0
+
+
+def _pick_first(d, *names):
+    return _pick(d, *names)
+
+
+def _text_or_none(v):
+    if v is None or pd.isna(v):
+        return None
+    text=str(v).strip()
+    return text if text else None
+
+
+def _num_or_none(v):
+    if v is None or pd.isna(v) or str(v).strip()=='':
+        return None
+    x=pd.to_numeric(pd.Series([v]),errors='coerce').iloc[0]
+    return float(x) if pd.notna(x) else None
+
+
+def import_lifecycle_history(c, df, workflow_source, source_name='Historical Lifecycle'):
+    """
+    Import one row per Match + Part + workflow cycle.
+
+    Canonical lifecycle:
+      NORMAL_REVIEW:  Before -> After QC -> After Audit
+      RECOLLECTION:   Before Recollection -> After Recollection -> After Audit
+
+    The importer accepts common historical column aliases and preserves the
+    original source row as a fingerprint so re-uploading the same file does
+    not create duplicate history.
+    """
+    d=normalize_columns(df)
+    src_default=str(workflow_source or '').strip().upper()
+    if src_default not in ('NORMAL_REVIEW','RECOLLECTION'):
+        raise ValueError("workflow_source must be NORMAL_REVIEW or RECOLLECTION.")
+
+    mid=_pick_first(d,'match_id','event_match_id','match')
+    pid=_pick_first(d,'part_id','part','event_part_id')
+    if not mid or not pid:
+        raise ValueError('Lifecycle file needs Match ID and Part columns.')
+
+    competition=_pick_first(d,'competition','comp')
+    match_name=_pick_first(d,'match_name','match')
+    collector=_pick_first(d,'collector','data_collector','collector_name')
+    owner=_pick_first(d,'owner','assigned_squad','squad','team','recollection_owner','review_owner')
+    reviewer_code=_pick_first(d,'reviewer_code','reviewer_code_qc','reviewer')
+    reviewer_name=_pick_first(d,'reviewer_name','qc_reviewer','quality_reviewer')
+    audit_reviewer=_pick_first(d,'audit_reviewer','auditor','audit_owner','auditor_name')
+    explicit_source=_pick_first(d,'workflow_source','review_source','source','workflow')
+    cycle_col=_pick_first(d,'cycle_key','review_cycle','cycle','batch','batch_name','run_id')
+    collection_date=_pick_first(d,'collection_date','collection_completion','collection_completion_date')
+    review_date=_pick_first(d,'review_date','qc_date','quality_review_date')
+    audit_date=_pick_first(d,'audit_date','audit_review_date')
+    note=_pick_first(d,'note','comment','comments')
+
+    if src_default=='RECOLLECTION':
+        before_col=_pick_first(d,'recollection_before','before_recollection','before_total','before_duels','before')
+        after_col=_pick_first(d,'recollection_after','after_recollection','after_total','after_duels','after','current_total')
+    else:
+        before_col=_pick_first(d,'before_qc','before_total','before_duels','before')
+        after_col=_pick_first(d,'after_qc','after_review','after_total','after_duels','after')
+    audit_col=_pick_first(d,'after_audit','audit_total','audit_duels','after_audit_total','final_total','final_duels','audit')
+
+    inserted=0
+    skipped=0
+    warnings={'missing_before':0,'missing_after':0,'missing_audit':0}
+    for idx,r in d.iterrows():
+        if pd.isna(r[mid]) or pd.isna(r[pid]):
+            skipped+=1
+            continue
+        try:
+            m=int(float(r[mid])); p=int(float(r[pid]))
+        except Exception:
+            skipped+=1
+            continue
+
+        source=(_text_or_none(r[explicit_source]) if explicit_source else None) or src_default
+        source=str(source).strip().upper().replace(' ','_')
+        if source not in ('NORMAL_REVIEW','RECOLLECTION'):
+            source=src_default
+
+        comp=_text_or_none(r[competition]) if competition else None
+        name=_text_or_none(r[match_name]) if match_name else None
+        coll=_text_or_none(r[collector]) if collector else None
+        own=_text_or_none(r[owner]) if owner else None
+        rcode=_text_or_none(r[reviewer_code]) if reviewer_code else None
+        rname=_text_or_none(r[reviewer_name]) if reviewer_name else None
+        audit_name=_text_or_none(r[audit_reviewer]) if audit_reviewer else None
+        before=_num_or_none(r[before_col]) if before_col else None
+        after=_num_or_none(r[after_col]) if after_col else None
+        audit=_num_or_none(r[audit_col]) if audit_col else None
+        if before is None: warnings['missing_before']+=1
+        if after is None: warnings['missing_after']+=1
+        if audit is None: warnings['missing_audit']+=1
+
+        cyc=_text_or_none(r[cycle_col]) if cycle_col else None
+        if not cyc:
+            rd=_text_or_none(r[review_date]) if review_date else None
+            ad=_text_or_none(r[audit_date]) if audit_date else None
+            cyc=f"{rd or ''}|{ad or ''}".strip('|') or str(source_name)
+
+        cdate=_text_or_none(r[collection_date]) if collection_date else None
+        rdate=_text_or_none(r[review_date]) if review_date else None
+        adate=_text_or_none(r[audit_date]) if audit_date else None
+        note_val=_text_or_none(r[note]) if note else None
+
+        fingerprint_payload='|'.join([
+            source, str(cyc), str(m), str(p),
+            str(comp or ''), str(coll or ''), str(own or ''),
+            str(rcode or ''), str(rname or ''), str(audit_name or ''),
+            str(before if before is not None else ''), str(after if after is not None else ''),
+            str(audit if audit is not None else ''),
+            str(cdate or ''), str(rdate or ''), str(adate or ''),
+            str(note_val or '')
+        ]).encode('utf-8')
+        fp=hashlib.sha256(fingerprint_payload).hexdigest()
+
+        cur=c.execute(
+            """INSERT OR IGNORE INTO lifecycle_records
+               (workflow_source,cycle_key,match_id,part_id,match_name,competition,collector,owner,
+                reviewer_code,reviewer_name,audit_reviewer,before_total,after_total,audit_total,
+                collection_date,review_date,audit_date,source_name,note,fingerprint)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (source,cyc,m,p,name,comp,coll,own,rcode,rname,audit_name,before,after,audit,
+             cdate,rdate,adate,source_name,note_val,fp)
+        )
+        if cur.rowcount:
+            inserted += 1
+
+    c.commit()
+    return {
+        'rows_read': int(len(d)),
+        'inserted': int(inserted),
+        'skipped': int(skipped),
+        'warnings': warnings,
+    }
+
+
+def rebuild_competition_benchmarks(c):
+    """Rebuild audit-based benchmark percentiles from lifecycle history."""
+    q=pd.read_sql_query(
+        """SELECT workflow_source,competition,part_id,audit_total
+           FROM lifecycle_records
+           WHERE audit_total IS NOT NULL
+             AND competition IS NOT NULL
+             AND TRIM(competition)<>''""",
+        c
+    )
+    c.execute("DELETE FROM competition_benchmarks")
+    if q.empty:
+        c.commit()
+        return 0
+
+    q['workflow_source']=q['workflow_source'].astype(str).str.upper()
+    q['competition']=q['competition'].astype(str).str.strip()
+    q['competition_key']=q['competition'].map(_norm)
+    q['part_id']=pd.to_numeric(q['part_id'],errors='coerce').fillna(0).astype(int)
+    q['audit_total']=pd.to_numeric(q['audit_total'],errors='coerce')
+    q=q.dropna(subset=['audit_total','competition_key'])
+    groups=0
+
+    for (src,ck,comp,part),g in q.groupby(['workflow_source','competition_key','competition','part_id'],dropna=False):
+        vals=g['audit_total'].astype(float)
+        stats=(len(vals),float(vals.mean()),float(vals.median()),
+               float(vals.quantile(.10)),float(vals.quantile(.25)),
+               float(vals.quantile(.75)),float(vals.quantile(.90)))
+        c.execute(
+            """INSERT OR REPLACE INTO competition_benchmarks
+               (workflow_source,competition_key,competition,part_id,sample_size,
+                mean_audit,median_audit,p10_audit,p25_audit,p75_audit,p90_audit)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (src,ck,comp,int(part),*stats)
+        )
+        groups+=1
+
+    # Also create a competition-wide fallback across both parts.
+    all_parts=(q.groupby(['workflow_source','competition_key','competition'],dropna=False)
+                 ['audit_total'].apply(list).reset_index())
+    for _,row in all_parts.iterrows():
+        vals=pd.Series(row['audit_total'],dtype='float64')
+        c.execute(
+            """INSERT OR REPLACE INTO competition_benchmarks
+               (workflow_source,competition_key,competition,part_id,sample_size,
+                mean_audit,median_audit,p10_audit,p25_audit,p75_audit,p90_audit)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+            (row['workflow_source'],row['competition_key'],row['competition'],0,
+             len(vals),float(vals.mean()),float(vals.median()),
+             float(vals.quantile(.10)),float(vals.quantile(.25)),
+             float(vals.quantile(.75)),float(vals.quantile(.90)))
+        )
+        groups+=1
+
+    c.commit()
+    return groups
+
+
+def lifecycle_counts(c):
+    row=c.execute(
+        """SELECT
+             COUNT(*) total,
+             SUM(workflow_source='NORMAL_REVIEW') normal_count,
+             SUM(workflow_source='RECOLLECTION') recollection_count,
+             SUM(audit_total IS NOT NULL) audited_count,
+             SUM(after_total IS NOT NULL) after_count
+           FROM lifecycle_records"""
+    ).fetchone()
+    return {
+        'total':int(row[0] or 0),
+        'normal_count':int(row[1] or 0),
+        'recollection_count':int(row[2] or 0),
+        'audited_count':int(row[3] or 0),
+        'after_count':int(row[4] or 0),
+    }
+
+
+def lifecycle_benchmark_df(c):
+    return pd.read_sql_query(
+        """SELECT workflow_source,competition,part_id,sample_size,
+                  ROUND(mean_audit,2) mean_audit,ROUND(median_audit,2) median_audit,
+                  ROUND(p10_audit,2) p10_audit,ROUND(p25_audit,2) p25_audit,
+                  ROUND(p75_audit,2) p75_audit,ROUND(p90_audit,2) p90_audit,
+                  updated_at
+           FROM competition_benchmarks
+           ORDER BY workflow_source,competition,part_id""",
+        c
+    )
