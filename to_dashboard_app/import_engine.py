@@ -96,7 +96,8 @@ def _store_matches(c,df,sid):
             k=_pick(d,*ns); return r[k] if k and pd.notna(r[k]) else None
         c.execute('insert or replace into matches_info(snapshot_id,match_id,sbd_id,match_name,competition,season,country,home_team,away_team,collection_completion,raw_json) values(?,?,?,?,?,?,?,?,?,?,?)',
             (sid, int(float(r[mid])), int(float(gv('sbd_id'))) if gv('sbd_id') is not None and str(gv('sbd_id'))!='' else None,
-             gv('match_name'),gv('competition'),int(float(gv('season'))) if gv('season') is not None and str(gv('season'))!='' else None,
+             gv('match_name'),gv('competition'),
+             (int(float(gv('season'))) if gv('season') is not None and str(gv('season')).strip()!='' and re.fullmatch(r'[-+]?\d+(?:\.0+)?',str(gv('season')).strip()) else None),
              gv('country'),gv('home_team'),gv('away_team'),str(gv('collection_completion','collection_completion_24h')) if gv('collection_completion','collection_completion_24h') is not None else None,None))
     return c.execute('select count(*) from matches_info where snapshot_id=?',(sid,)).fetchone()[0]
 
