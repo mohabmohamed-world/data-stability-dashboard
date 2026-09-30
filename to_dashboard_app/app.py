@@ -187,6 +187,63 @@ def run_audit_reconciliation():
     finally:
         c.close()
 
+def force_reviewed_matches_sync_for_audit():
+    """Force a fresh Reviewed Matches pull for audit reconciliation."""
+    url=_streamlit_secret('GOOGLE_SYNC_URL')
+    secret=_streamlit_secret('GOOGLE_SYNC_SECRET')
+    if not url or not secret:
+        raise RuntimeError('GOOGLE_SYNC_URL / GOOGLE_SYNC_SECRET are not configured.')
+
+    payload=pull_sheet(url, secret, 'Reviewed Matches')
+    rows=payload.get('rows', [])
+    if not isinstance(rows, list):
+        raise ValueError('Reviewed Matches response is not a row list.')
+    if not rows:
+        raise RuntimeError('Reviewed Matches returned 0 rows; no database replacement was performed.')
+
+    c=conn()
+    try:
+        n=import_reviewed_parts(c,pd.DataFrame(rows),'Google Sheets — Reviewed Matches (Forced Audit Sync)')
+        reviewed_total=c.execute('SELECT COUNT(*) FROM reviewed_parts').fetchone()[0]
+        complete_total=c.execute(
+            """SELECT COUNT(*) FROM reviewed_parts
+               WHERE UPPER(TRIM(COALESCE(complete_flag,''))) IN
+                     ('YES','Y','TRUE','1','COMPLETED','COMPLETE')
+                  OR UPPER(TRIM(COALESCE(complete_flag,''))) LIKE 'YES%'
+                  OR UPPER(TRIM(COALESCE(complete_flag,''))) LIKE 'TRUE%'
+                  OR UPPER(TRIM(COALESCE(complete_flag,''))) LIKE 'COMPLETE%'"""
+        ).fetchone()[0]
+        overlap_total=c.execute(
+            """SELECT COUNT(*) FROM lifecycle_records lr
+               JOIN reviewed_parts rp ON rp.match_id=lr.match_id AND rp.part_id=lr.part_id
+               WHERE lr.workflow_source='RECOLLECTION'"""
+        ).fetchone()[0]
+        complete_overlap=c.execute(
+            """SELECT COUNT(*) FROM lifecycle_records lr
+               JOIN reviewed_parts rp ON rp.match_id=lr.match_id AND rp.part_id=lr.part_id
+               WHERE lr.workflow_source='RECOLLECTION'
+                 AND (
+                   UPPER(TRIM(COALESCE(rp.complete_flag,''))) IN
+                     ('YES','Y','TRUE','1','COMPLETED','COMPLETE')
+                   OR UPPER(TRIM(COALESCE(rp.complete_flag,''))) LIKE 'YES%'
+                   OR UPPER(TRIM(COALESCE(rp.complete_flag,''))) LIKE 'TRUE%'
+                   OR UPPER(TRIM(COALESCE(rp.complete_flag,''))) LIKE 'COMPLETE%'
+                 )"""
+        ).fetchone()[0]
+    finally:
+        c.close()
+
+    recon=run_audit_reconciliation()
+    return {
+        'rows_loaded':int(n),
+        'reviewed_total':int(reviewed_total),
+        'complete_total':int(complete_total),
+        'overlap_total':int(overlap_total),
+        'complete_overlap':int(complete_overlap),
+        'reconciliation':recon,
+    }
+
+
 def lifecycle_page():
     st.title('🧬 Lifecycle & Audit Benchmarks')
     st.caption('Historical truth layer: NORMAL REVIEW = Before → QC After → Audit; RECOLLECTION = Before Recollection → After Recollection → Audit.')
@@ -229,6 +286,56 @@ def lifecycle_page():
 
     st.subheader('🔄 Audit → Dashboard Reconciliation')
     st.caption('Audit completion is an event. Dashboard Current is a delayed observation. An audited half stays tracked until a later snapshot confirms CHANGED or NO NET CHANGE.')
+
+    sync_col,diag_col=st.columns([1,2])
+    with sync_col:
+        if st.button('🔄 Refresh Reviewed Matches & Reconcile',key='refresh_reviewed_audit'):
+            try:
+                result=force_reviewed_matches_sync_for_audit()
+                st.success(
+                    f"Reviewed: {result['reviewed_total']:,} | "
+                    f"Complete: {result['complete_total']:,} | "
+                    f"Recollection overlap: {result['overlap_total']:,} | "
+                    f"Complete overlap: {result['complete_overlap']:,}"
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f'❌ Reviewed Matches audit sync failed: {e}')
+
+    cdiag=conn()
+    reviewed_total=cdiag.execute('SELECT COUNT(*) FROM reviewed_parts').fetchone()[0]
+    complete_total=cdiag.execute(
+        """SELECT COUNT(*) FROM reviewed_parts
+           WHERE UPPER(TRIM(COALESCE(complete_flag,''))) IN
+                 ('YES','Y','TRUE','1','COMPLETED','COMPLETE')
+              OR UPPER(TRIM(COALESCE(complete_flag,''))) LIKE 'YES%'
+              OR UPPER(TRIM(COALESCE(complete_flag,''))) LIKE 'TRUE%'
+              OR UPPER(TRIM(COALESCE(complete_flag,''))) LIKE 'COMPLETE%'"""
+    ).fetchone()[0]
+    overlap_total=cdiag.execute(
+        """SELECT COUNT(*) FROM lifecycle_records lr
+           JOIN reviewed_parts rp ON rp.match_id=lr.match_id AND rp.part_id=lr.part_id
+           WHERE lr.workflow_source='RECOLLECTION'"""
+    ).fetchone()[0]
+    complete_overlap=cdiag.execute(
+        """SELECT COUNT(*) FROM lifecycle_records lr
+           JOIN reviewed_parts rp ON rp.match_id=lr.match_id AND rp.part_id=lr.part_id
+           WHERE lr.workflow_source='RECOLLECTION'
+             AND (
+               UPPER(TRIM(COALESCE(rp.complete_flag,''))) IN
+                 ('YES','Y','TRUE','1','COMPLETED','COMPLETE')
+               OR UPPER(TRIM(COALESCE(rp.complete_flag,''))) LIKE 'YES%'
+               OR UPPER(TRIM(COALESCE(rp.complete_flag,''))) LIKE 'TRUE%'
+               OR UPPER(TRIM(COALESCE(rp.complete_flag,''))) LIKE 'COMPLETE%'
+             )"""
+    ).fetchone()[0]
+    cdiag.close()
+    with diag_col:
+        d1,d2,d3,d4=st.columns(4)
+        d1.metric('Reviewed Keys',f'{reviewed_total:,}')
+        d2.metric('Complete',f'{complete_total:,}')
+        d3.metric('Recollection Overlap',f'{overlap_total:,}')
+        d4.metric('Complete Overlap',f'{complete_overlap:,}')
     rc=conn()
     try:
         rcounts=reconciliation_counts(rc)
