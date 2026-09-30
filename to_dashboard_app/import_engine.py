@@ -515,9 +515,10 @@ def import_lifecycle_history(c, df, workflow_source, source_name='Historical Lif
             """INSERT OR IGNORE INTO lifecycle_records
                (workflow_source,cycle_key,match_id,part_id,match_name,competition,collector,owner,
                 reviewer_code,reviewer_name,audit_reviewer,before_total,after_total,audit_total,
-                collection_date,review_date,audit_date,source_name,note,fingerprint)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                audit_total_source,collection_date,review_date,audit_date,source_name,note,fingerprint)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (source,cyc,m,p,name,comp,coll,own,rcode,rname,audit_name,before,after,audit,
+             ('historical_import' if audit is not None else None),
              cdate,rdate,adate,source_name,note_val,fp)
         )
         if cur.rowcount:
