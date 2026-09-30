@@ -233,10 +233,10 @@ def reconcile_recollection_audits(c, snapshot_id):
                     changed_total, now, _observation_note(c, snapshot_id, audit_value),
                 ),
             )
-            c.execute(
-                "UPDATE lifecycle_records SET audit_total=? WHERE id=?",
-                (float(audit_total_value), lid) if audit_total_value is not None else (None, lid),
-            )
+            # IMPORTANT: Dashboard observations must never be written into
+            # lifecycle_records.audit_total. That field is reserved for an actual
+            # historical Audit value supplied by the lifecycle source.
+            # Dashboard Current belongs in audit_reconciliation.last_observed_total.
             created += 1
             continue
 
@@ -319,10 +319,6 @@ def reconcile_recollection_audits(c, snapshot_id):
             else:
                 audit_total_value = expected
 
-        c.execute(
-            "UPDATE lifecycle_records SET audit_total=? WHERE id=?",
-            (float(audit_total_value), lid) if audit_total_value is not None else (None, lid),
-        )
 
         c.execute(
             """UPDATE audit_reconciliation
