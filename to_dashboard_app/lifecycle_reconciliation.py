@@ -67,14 +67,21 @@ def reconcile_recollection_audits(c, snapshot_id):
 
     # Only a Reviewed Matches row explicitly marked Complete/Yes is an audit-complete signal.
     completed = pd.read_sql_query(
-        """SELECT lr.id AS lifecycle_id, lr.workflow_source, lr.match_id, lr.part_id,
-                  lr.after_total, lr.audit_date, lr.audit_reviewer
+        """SELECT lr.id AS lifecycle_id,
+                  lr.workflow_source,
+                  lr.match_id,
+                  lr.part_id,
+                  lr.after_total,
+                  COALESCE(NULLIF(TRIM(lr.audit_date),''), NULLIF(TRIM(rp.review_date),'')) AS resolved_audit_date,
+                  COALESCE(NULLIF(TRIM(lr.audit_reviewer),''), NULLIF(TRIM(rp.audit_reviewer),'')) AS resolved_audit_reviewer,
+                  rp.complete_flag
            FROM lifecycle_records lr
            JOIN reviewed_parts rp
              ON rp.match_id=lr.match_id AND rp.part_id=lr.part_id
            WHERE lr.workflow_source='RECOLLECTION'
-             AND COALESCE(lr.after_total, NULL) IS NOT NULL
-             AND UPPER(COALESCE(rp.complete_flag,'')) IN ('YES','Y','TRUE','1','COMPLETED','COMPLETE')""",
+             AND lr.after_total IS NOT NULL
+             AND UPPER(TRIM(COALESCE(rp.complete_flag,''))) IN
+                 ('YES','Y','TRUE','1','COMPLETED','COMPLETE')""",
         c,
     )
 
@@ -110,7 +117,7 @@ def reconcile_recollection_audits(c, snapshot_id):
                     last_observed_total,status,changed_total,last_checked_at,note)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    lid, r.workflow_source, m, p, r.audit_date, expected,
+                    lid, r.workflow_source, m, p, r.resolved_audit_date, expected,
                     snapshot_id, snapshot_id, current, status, changed_total, now,
                     "Initial observation after audit completion.",
                 ),
@@ -176,7 +183,8 @@ def reconciliation_df(c):
     return pd.read_sql_query(
         """SELECT ar.workflow_source, ar.match_id, ar.part_id,
                   lr.match_name, lr.competition, lr.collector, lr.owner,
-                  lr.audit_reviewer, lr.audit_date,
+                  COALESCE(NULLIF(TRIM(lr.audit_reviewer),''), NULLIF(TRIM(rp.audit_reviewer),'')) AS audit_reviewer,
+                  COALESCE(NULLIF(TRIM(lr.audit_date),''), NULLIF(TRIM(rp.review_date),'')) AS audit_date,
                   ar.expected_after_total AS after_recollection,
                   ar.last_observed_total AS dashboard_current,
                   CASE
@@ -191,6 +199,7 @@ def reconciliation_df(c):
                   ar.note
            FROM audit_reconciliation ar
            JOIN lifecycle_records lr ON lr.id=ar.lifecycle_id
+           LEFT JOIN reviewed_parts rp ON rp.match_id=ar.match_id AND rp.part_id=ar.part_id
            ORDER BY CASE ar.status
                     WHEN 'AUDIT_COMPLETED — AWAITING_DASHBOARD_UPDATE' THEN 0
                     WHEN 'AUDITED — CHANGED' THEN 1
