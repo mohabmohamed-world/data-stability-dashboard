@@ -627,10 +627,38 @@ def dashboard():
     st.caption('Summary logic: v2.2 — Recollection Review + smart assignment')
     sid=current_snapshot_id()
     if not sid: st.info('ابدأ برفع Base + Matches Info.'); return
-    x=df('''SELECT COUNT(*) halves,COALESCE(SUM(CASE WHEN total_duels<60 THEN 1 ELSE 0 END),0) eligible,COALESCE(SUM(metadata_missing),0) missing FROM match_part_summary WHERE snapshot_id=?''',(sid,)).iloc[0]
+    base_diag=df(
+        '''SELECT
+             COUNT(*) AS base_rows,
+             COUNT(DISTINCT CAST(event_match_id AS TEXT)||':'||CAST(event_part_id AS TEXT)) AS base_keys
+           FROM raw_base WHERE snapshot_id=?''',
+        (sid,)
+    ).iloc[0]
+    base_rows=int(base_diag['base_rows'] or 0)
+    base_keys=int(base_diag['base_keys'] or 0)
+
+    x=df(
+        '''SELECT COUNT(*) halves,
+                  COALESCE(SUM(CASE WHEN total_duels<60 THEN 1 ELSE 0 END),0) eligible,
+                  COALESCE(SUM(metadata_missing),0) missing
+           FROM match_part_summary WHERE snapshot_id=?''',
+        (sid,)
+    ).iloc[0]
     halves=int(x['halves'] or 0); eligible=int(x['eligible'] or 0); missing=int(x['missing'] or 0)
-    if halves == 0:
-        st.warning('⚠️ يوجد CURRENT snapshot لكن لم يتم بناء Match + Part Summary بعد.')
+
+    if base_rows == 0:
+        st.error(
+            f'🚨 CURRENT snapshot {sid} has 0 Base rows. '
+            'The dashboard is not allowed to calculate Match + Part totals from Extras alone.'
+        )
+        st.info('Upload a valid full Base export and process it before using the dashboard.')
+        return
+
+    if halves != base_keys:
+        st.error(
+            f'🚨 Summary integrity check failed: Base keys={base_keys:,} but Summary keys={halves:,}. '
+            'The dashboard will not treat this as a trusted CURRENT snapshot.'
+        )
         if st.button('🔧 Rebuild Current Match + Part Summary', key='dashboard_rebuild_current_summary'):
             try:
                 c=conn()
