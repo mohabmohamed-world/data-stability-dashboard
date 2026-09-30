@@ -209,9 +209,17 @@ def lifecycle_page():
     st.subheader('🔄 Audit → Dashboard Reconciliation')
     st.caption('Audit completion is an event. Dashboard Current is a delayed observation. An audited half stays tracked until a later snapshot confirms CHANGED or NO NET CHANGE.')
     rc=conn()
-    rcounts=reconciliation_counts(rc)
-    rdf=reconciliation_df(rc)
-    rc.close()
+    try:
+        rcounts=reconciliation_counts(rc)
+        rdf=reconciliation_df(rc)
+    except Exception as e:
+        # Never block the Lifecycle upload area because the reconciliation
+        # history table is from an older DB schema or is temporarily unavailable.
+        rcounts={'total':0,'awaiting':0,'changed':0,'no_net_change':0}
+        rdf=pd.DataFrame()
+        st.warning(f'🟠 Reconciliation view is temporarily unavailable; Lifecycle uploads are still enabled. Details: {e}')
+    finally:
+        rc.close()
     q1,q2,q3,q4=st.columns(4)
     q1.metric('Audit Completed',f"{rcounts['total']:,}")
     q2.metric('Awaiting Dashboard Update',f"{rcounts['awaiting']:,}")
