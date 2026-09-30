@@ -462,7 +462,7 @@ def rebuild_competition_benchmarks(c):
             """INSERT OR REPLACE INTO competition_benchmarks
                (workflow_source,competition_key,competition,part_id,sample_size,
                 mean_audit,median_audit,p10_audit,p25_audit,p75_audit,p90_audit)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (src,ck,comp,int(part),*stats)
         )
         groups+=1
@@ -476,7 +476,7 @@ def rebuild_competition_benchmarks(c):
             """INSERT OR REPLACE INTO competition_benchmarks
                (workflow_source,competition_key,competition,part_id,sample_size,
                 mean_audit,median_audit,p10_audit,p25_audit,p75_audit,p90_audit)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (row['workflow_source'],row['competition_key'],row['competition'],0,
              len(vals),float(vals.mean()),float(vals.median()),
              float(vals.quantile(.10)),float(vals.quantile(.25)),
