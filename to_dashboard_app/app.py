@@ -603,8 +603,7 @@ def _reviewed_sheet_fingerprint(rows):
 
 
 @st.fragment(run_every="2m")
-def live_reviewed_matches_sync()
-run_audit_reconciliation():
+def live_reviewed_matches_sync():
     url=_streamlit_secret('GOOGLE_SYNC_URL')
     secret=_streamlit_secret('GOOGLE_SYNC_SECRET')
     if not url or not secret:
