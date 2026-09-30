@@ -102,25 +102,74 @@ def _store_matches(c,df,sid):
     return c.execute('select count(*) from matches_info where snapshot_id=?',(sid,)).fetchone()[0]
 
 def _summary(c,sid):
+    # A CURRENT summary must be based on Base first, then enriched with Extras.
+    # Never create Match + Part rows from Extras alone: that produces plausible-looking
+    # totals that are actually only Aerial Won + Step-In.
+    base_exists = c.execute(
+        "SELECT 1 FROM raw_base WHERE snapshot_id=? LIMIT 1", (sid,)
+    ).fetchone()
+    if not base_exists:
+        raise ValueError(
+            f"CURRENT snapshot {sid} contains no Base rows. "
+            "Summary rebuild aborted to prevent an Extras-only dashboard."
+        )
+
     c.execute('delete from match_part_summary where snapshot_id=?',(sid,))
-    rows=c.execute('select event_match_id,event_part_id,tornado_event,events_count_after_completion from raw_base where snapshot_id=?',(sid,)).fetchall()
+    rows=c.execute(
+        '''SELECT event_match_id,event_part_id,tornado_event,
+                  events_count_after_completion
+           FROM raw_base WHERE snapshot_id=?''',
+        (sid,)
+    ).fetchall()
     flags=_flag_map(c)
     agg={}
+
+    # Sum duplicate event rows instead of overwriting the last row.
     for m,p,e,v in rows:
-        k=(int(m),int(p)); agg.setdefault(k,{})
+        k=(int(m),int(p))
+        agg.setdefault(k,{})
         ek=_norm(e).replace('_',' ')
-        agg[k][EVENT_COLS.get(ek,ek)]=float(v or 0)
-    extras=c.execute('select ex_match_id,ex_part_id,tornado_extra,extras_counter from extras_current').fetchall()
+        col=EVENT_COLS.get(ek,ek)
+        agg[k][col]=agg[k].get(col,0.0)+float(v or 0)
+
+    # Extras enrich Base keys only. Extras-only keys are intentionally ignored.
+    extras=c.execute(
+        '''SELECT ex_match_id,ex_part_id,tornado_extra,extras_counter
+           FROM extras_current'''
+    ).fetchall()
+    base_keys=set(agg)
     for m,p,e,v in extras:
-        k=(int(m),int(p)); agg.setdefault(k,{})[EVENT_COLS.get(_norm(e).replace('_',' '),_norm(e).replace('_',' '))]=float(v or 0)
-    meta={int(r[0]):r for r in c.execute('select match_id,match_name,competition,collection_completion from matches_info where snapshot_id=?',(sid,)).fetchall()}
-    cols=['dribble','fifty_fifty','hold_up_duel','leg_stretch_duel','positioning_duel','separation_duel','shield','tackle','aerial_won','step_in']
+        k=(int(m),int(p))
+        if k not in base_keys:
+            continue
+        ek=_norm(e).replace('_',' ')
+        col=EVENT_COLS.get(ek,ek)
+        agg[k][col]=agg[k].get(col,0.0)+float(v or 0)
+
+    meta={int(r[0]):r for r in c.execute(
+        'select match_id,match_name,competition,collection_completion '
+        'from matches_info where snapshot_id=?',(sid,)
+    ).fetchall()}
+    cols=['dribble','fifty_fifty','hold_up_duel','leg_stretch_duel',
+          'positioning_duel','separation_duel','shield','tackle',
+          'aerial_won','step_in']
     for (m,p),vals in agg.items():
-        v=[float(vals.get(x,0)) for x in cols]; total=sum(v)
-        md=meta.get(m); sev=flags.get(m,'NO_BASELINE')
-        if sev not in SEV_RANK: sev='UNFLAGGED'
-        c.execute('insert into match_part_summary(snapshot_id,match_id,part_id,dribble,fifty_fifty,hold_up_duel,leg_stretch_duel,positioning_duel,separation_duel,shield,tackle,aerial_won,step_in,total_duels,match_name,competition,collection_completion,severity,severity_rank,metadata_missing) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            (sid,m,p,*v,total,md[1] if md else None,md[2] if md else None,md[3] if md else None,sev,SEV_RANK[sev],0 if md else 1))
+        v=[float(vals.get(x,0)) for x in cols]
+        total=sum(v)
+        md=meta.get(m)
+        sev=flags.get(m,'NO_BASELINE')
+        if sev not in SEV_RANK:
+            sev='UNFLAGGED'
+        c.execute(
+            '''insert into match_part_summary(
+                 snapshot_id,match_id,part_id,dribble,fifty_fifty,hold_up_duel,
+                 leg_stretch_duel,positioning_duel,separation_duel,shield,tackle,
+                 aerial_won,step_in,total_duels,match_name,competition,
+                 collection_completion,severity,severity_rank,metadata_missing)
+               values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (sid,m,p,*v,total,md[1] if md else None,md[2] if md else None,
+             md[3] if md else None,sev,SEV_RANK[sev],0 if md else 1)
+        )
 
 def import_base_full(c,df,matches_df=None,flags_df=None,reviewers_df=None):
     d=normalize_columns(df); 
@@ -140,6 +189,16 @@ def import_base_full(c,df,matches_df=None,flags_df=None,reviewers_df=None):
     if flags_df is not None: import_flags(c,flags_df)
     if matches_df is not None: _store_matches(c,matches_df,sid)
     if reviewers_df is not None: import_reviewers(c,reviewers_df)
+    # Validate the Base export shape before treating it as CURRENT.
+    base_group_sizes=d.groupby([mid,pid]).size()
+    base_event_sets=d.groupby([mid,pid])[ev].nunique()
+    invalid_groups=int(((base_group_sizes!=8) | (base_event_sets!=8)).sum())
+    if invalid_groups:
+        raise ValueError(
+            f'Base export validation failed: {invalid_groups:,} Match + Part groups '
+            'do not contain exactly 8 Base event rows / 8 unique event types.'
+        )
+
     # Base Before/After comparison from the same Tableau export.
     c.execute('delete from snapshot_comparisons where current_snapshot_id=?',(sid,))
     for (m,p,e),g in d.groupby([mid,pid,ev],sort=False):
