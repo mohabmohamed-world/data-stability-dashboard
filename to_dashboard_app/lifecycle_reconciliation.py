@@ -295,13 +295,23 @@ def reconcile_recollection_audits(c, snapshot_id):
                 awaiting += 1
 
         elif status == STATUS_CHANGED:
-            # Once a true post-audit change has been observed, retain CHANGED.
-            if current_is_post_audit:
+            # A later proven post-audit snapshot that matches the Recollection After
+            # value means the dashboard has converged: downgrade to NO NET CHANGE.
+            # A snapshot that still differs keeps the row as CHANGED.
+            if current_is_post_audit and current is not None:
                 last_snapshot = snapshot_id
                 last_observed_total = current
-                if changed_total is None and current is not None:
-                    changed_total = current
-            audit_total_value = changed_total
+                if current == expected:
+                    status = STATUS_NO_CHANGE
+                    changed_total = expected
+                    audit_total_value = expected
+                    no_change += 1
+                else:
+                    if changed_total is None:
+                        changed_total = current
+                    audit_total_value = changed_total
+            else:
+                audit_total_value = changed_total
 
         elif status == STATUS_NO_CHANGE:
             # A later, proven post-audit snapshot that differs from the expected
